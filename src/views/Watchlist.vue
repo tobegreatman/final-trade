@@ -56,12 +56,17 @@
             搜索并添加自选股
           </div>
           <div
-            v-for="stock in watchlistStore.stocks"
+            v-for="(stock, idx) in watchlistStore.stocks"
             :key="stock.code"
             class="stock-item"
-            :class="{ active: selectedCode === stock.code }"
+            :class="{ active: selectedCode === stock.code, dragging: dragIdx === idx, 'drag-over': dragOverIdx === idx }"
+            draggable="true"
+            @dragstart="onDragStart($event, idx)"
+            @dragover.prevent="onDragOver($event, idx)"
+            @dragend="onDragEnd"
             @click="selectStock(stock.code)"
           >
+            <div class="drag-handle">⠿</div>
             <div class="stock-item__info">
               <div class="stock-item__name">{{ stock.name }}</div>
               <div class="stock-item__code">{{ stock.code }}</div>
@@ -109,8 +114,14 @@
 
           <!-- Chart -->
           <div class="chart-area">
+            <KlineChart
+              v-if="isKlineMode && chartData.length"
+              :data="chartData"
+              :height="280"
+              :auto-width="true"
+            />
             <Sparkline
-              v-if="chartData.length"
+              v-else-if="chartData.length"
               :data="chartData"
               :positive="chartPositive"
               :show-area="true"
@@ -150,6 +161,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useWatchlistStore } from '../stores/watchlist.js'
 import Sparkline from '../components/Sparkline.vue'
+import KlineChart from '../components/KlineChart.vue'
 
 const watchlistStore = useWatchlistStore()
 
@@ -165,6 +177,7 @@ const indexIntraday = ref({ sh: { name: '上证指数', trends: [], isUp: false,
 
 // Cache for detail data
 const intradayCache = ref({})
+const intraday5dCache = ref({})
 const klineCache = ref({})
 const kline5yCache = ref({})
 const basicCache = ref({})
@@ -174,6 +187,7 @@ const periods = [
   { key: '1w', label: '1周' },
   { key: '1m', label: '1月' },
   { key: '3m', label: '3月' },
+  { key: '1y', label: '1年' },
   { key: '5y', label: '5年' },
   { key: 'all', label: '全部' }
 ]
@@ -182,12 +196,15 @@ const chartData = computed(() => {
   if (!selectedCode.value) return []
   const p = activePeriod.value
   if (p === '1d') return intradayCache.value[selectedCode.value]?.trends || []
-  if (p === '1w') return (klineCache.value[selectedCode.value]?.klines || []).slice(-5)
+  if (p === '1w') return intraday5dCache.value[selectedCode.value]?.trends || []
   if (p === '1m') return (klineCache.value[selectedCode.value]?.klines || []).slice(-22)
   if (p === '3m') return (klineCache.value[selectedCode.value]?.klines || []).slice(-60)
+  if (p === '1y') return (kline5yCache.value[selectedCode.value]?.klines || []).slice(-250)
   if (p === '5y' || p === 'all') return kline5yCache.value[selectedCode.value]?.klines || []
   return []
 })
+
+const isKlineMode = computed(() => ['1m', '3m', '1y', '5y', 'all'].includes(activePeriod.value))
 
 const chartPositive = computed(() => isQuoteUp(selectedCode.value))
 const chartTotalSlots = computed(() => activePeriod.value === '1d' ? 240 : 0)
@@ -230,7 +247,7 @@ function getQuotePrice(code) {
 function getQuoteChange(code) {
   const q = watchlistStore.quotes[code]
   if (!q || q.change == null) return '--'
-  return (q.change >= 0 ? '+' : '') + (q.change / 100).toFixed(2) + '%'
+  return (q.change >= 0 ? '+' : '') + q.change.toFixed(2) + '%'
 }
 
 function getQuoteClass(code) {
@@ -271,6 +288,7 @@ function addFromSearch(item) {
   showSearch.value = false
   searchKw.value = ''
   searchResults.value = []
+  watchlistStore.fetchQuotes()
 }
 
 async function selectStock(code) {
@@ -296,6 +314,11 @@ async function selectStock(code) {
 
 function switchPeriod(key) {
   activePeriod.value = key
+  if (key === '1w' && selectedCode.value && !intraday5dCache.value[selectedCode.value]) {
+    fetch(`/api/stock/${selectedCode.value}/intraday5d`)
+      .then(r => r.json())
+      .then(json => { if (json.ok && json.data?.trends?.length) intraday5dCache.value[selectedCode.value] = json.data })
+  }
   // Load 5y data on demand
   if ((key === '5y' || key === 'all') && selectedCode.value && !kline5yCache.value[selectedCode.value]) {
     fetch(`/api/stock/${selectedCode.value}/kline5y`)
@@ -309,6 +332,29 @@ function removeSelected() {
   if (!selectedCode.value) return
   watchlistStore.removeStock(selectedCode.value)
   selectedCode.value = null
+}
+
+// --- Drag & drop reorder ---
+const dragIdx = ref(null)
+const dragOverIdx = ref(null)
+
+function onDragStart(e, idx) {
+  dragIdx.value = idx
+  e.dataTransfer.effectAllowed = 'move'
+  e.dataTransfer.setData('text/plain', '')
+}
+
+function onDragOver(e, idx) {
+  if (dragIdx.value === null || dragIdx.value === idx) return
+  dragOverIdx.value = idx
+}
+
+function onDragEnd() {
+  if (dragIdx.value !== null && dragOverIdx.value !== null && dragIdx.value !== dragOverIdx.value) {
+    watchlistStore.reorderStock(dragIdx.value, dragOverIdx.value)
+  }
+  dragIdx.value = null
+  dragOverIdx.value = null
 }
 
 async function fetchIndexIntraday() {
@@ -343,7 +389,7 @@ let detailIntradayTimer = null
 function startIndexTimer() {
   if (indexTimer) return
   fetchIndexIntraday()
-  indexTimer = setInterval(fetchIndexIntraday, 30000)
+  indexTimer = setInterval(fetchIndexIntraday, 10000)
 }
 
 function stopIndexTimer() {
@@ -364,7 +410,7 @@ function startDetailIntradayTimer() {
   stopDetailIntradayTimer()
   if (!selectedCode.value || activePeriod.value !== '1d') return
   refreshDetailIntraday()
-  detailIntradayTimer = setInterval(refreshDetailIntraday, 30000)
+  detailIntradayTimer = setInterval(refreshDetailIntraday, 10000)
 }
 
 function stopDetailIntradayTimer() {
@@ -383,24 +429,20 @@ function onVisibilityChange() {
   if (document.hidden) {
     stopIndexTimer()
     stopDetailIntradayTimer()
-    watchlistStore.stopAutoRefresh()
   } else {
     startIndexTimer()
-    watchlistStore.startAutoRefresh()
     restartIntradayDetailTimer()
   }
 }
 
 onMounted(() => {
   startIndexTimer()
-  watchlistStore.startAutoRefresh()
   document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onBeforeUnmount(() => {
   stopIndexTimer()
   stopDetailIntradayTimer()
-  watchlistStore.stopAutoRefresh()
   document.removeEventListener('visibilitychange', onVisibilityChange)
   clearTimeout(searchTimer)
 })
@@ -566,7 +608,7 @@ onBeforeUnmount(() => {
   padding: 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, opacity 0.15s;
 }
 
 .stock-item:hover {
@@ -575,6 +617,34 @@ onBeforeUnmount(() => {
 
 .stock-item.active {
   background: var(--accent-dim);
+}
+
+.stock-item.dragging {
+  opacity: 0.4;
+}
+
+.stock-item.drag-over {
+  border-top: 2px solid var(--accent);
+  padding-top: 8px;
+}
+
+.drag-handle {
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 0.15s;
+  user-select: none;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.stock-item:hover .drag-handle {
+  opacity: 0.6;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
 }
 
 .stock-item__info {

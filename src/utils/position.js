@@ -24,17 +24,22 @@ export function calcATR(klines) {
 }
 
 /**
- * 计算止损价
- * @param {number} buyPrice - 买入价
- * @param {number} atr - ATR 值
- * @param {string} strategy - 策略 key (trend/pullback/bottom)
- * @returns {number} 止损价
+ * 计算止损价（含波动率自适应）
+ * 高波动(ATR/price>5%): N+0.5 给更多空间，低波动(ATR/price<1.5%): N-0.5 收紧
  */
 export function calcStopLoss(buyPrice, atr, strategy) {
   const params = STRATEGY_PARAMS[strategy]
-  if (!params) return buyPrice * 0.92 // 默认 8% 止损
-  const stop = buyPrice - params.atrN * atr
-  return Math.max(stop, 0.01) // 止损价不能为负
+  if (!params) return buyPrice * 0.92
+  let n = params.atrN
+  const volatility = atr / buyPrice
+  if (volatility > 0.05) n += 0.5
+  else if (volatility < 0.015) n = Math.max(n - 0.5, 0.5)
+  const stop = buyPrice - n * atr
+  let result = Math.max(stop, 0.01)
+  if (strategy === 'bottom') {
+    result = Math.min(result, buyPrice * 0.92)
+  }
+  return result
 }
 
 /**
@@ -42,19 +47,22 @@ export function calcStopLoss(buyPrice, atr, strategy) {
  * @param {number} totalCapital - 总资金
  * @param {number} buyPrice - 买入价
  * @param {number} stopPrice - 止损价
+ * @param {string} [strategy] - 策略 key，用于获取上限
  * @returns {{ amount: number, pct: number, shares: number }}
  */
-export function calcPosition(totalCapital, buyPrice, stopPrice) {
+export function calcPosition(totalCapital, buyPrice, stopPrice, strategy) {
   if (!buyPrice || !stopPrice || buyPrice <= stopPrice) {
     return { amount: 0, pct: 0, shares: 0 }
   }
   const stopPct = (buyPrice - stopPrice) / buyPrice
-  const riskBudget = totalCapital * 0.02 // 单笔最大亏损 2%
+  const riskBudget = totalCapital * 0.02
   const posByRisk = riskBudget / stopPct
-  const posByLimit = totalCapital * 0.25 // 单只上限 25%
+  const params = strategy ? STRATEGY_PARAMS[strategy] : null
+  const posLimit = params ? params.maxPosition : 0.25
+  const posByLimit = totalCapital * posLimit
   const amount = Math.min(posByRisk, posByLimit)
   const pct = (amount / totalCapital) * 100
-  const shares = Math.floor(amount / buyPrice / 100) * 100 // 取整百股
+  const shares = Math.floor(amount / buyPrice / 100) * 100
   return { amount: Math.round(amount * 100) / 100, pct: Math.round(pct * 100) / 100, shares }
 }
 
@@ -73,29 +81,40 @@ export function calcRiskReward(buyPrice, stopPrice, targetPrice) {
   return Math.round((reward / risk) * 100) / 100
 }
 
-/**
- * 计算初始跟踪止盈价
- * @param {number} buyPrice
- * @param {string} strategy
- * @returns {number}
- */
-export function calcTrailingStop(buyPrice, strategy) {
-  const params = STRATEGY_PARAMS[strategy]
-  if (!params) return buyPrice * 0.92
-  return buyPrice * (1 - params.trailPct)
+function getAdjustedM(atr, buyPrice, trailAtrN) {
+  if (!atr) return trailAtrN
+  const volatility = atr / buyPrice
+  let m = trailAtrN
+  if (volatility > 0.05) m += 0.5
+  else if (volatility < 0.015) m = Math.max(m - 0.5, 0.5)
+  return m
 }
 
 /**
- * 更新跟踪止盈价（只上移不下调）
- * @param {number} currentTrailing - 当前跟踪止盈价
- * @param {number} highestClose - 持仓期间最高收盘价
- * @param {string} strategy
- * @returns {number} 新的跟踪止盈价
+ * 计算初始跟踪止盈价（ATR 动态回撤）
  */
-export function updateTrailingStop(currentTrailing, highestClose, strategy) {
+export function calcTrailingStop(buyPrice, atr, strategy) {
+  const params = STRATEGY_PARAMS[strategy]
+  if (!params) return buyPrice * 0.92
+  if (!atr) return buyPrice * (1 - params.trailAtrN * 0.03)
+  const m = getAdjustedM(atr, buyPrice, params.trailAtrN)
+  const trail = buyPrice - m * atr
+  return Math.max(trail, 0.01)
+}
+
+/**
+ * 更新跟踪止盈价（只上移不下调，ATR 动态）
+ */
+export function updateTrailingStop(currentTrailing, highestClose, atr, strategy) {
   const params = STRATEGY_PARAMS[strategy]
   if (!params) return currentTrailing
-  const newTrailing = highestClose * (1 - params.trailPct)
+  if (!atr) {
+    const trailPct = params.trailAtrN * 0.03
+    const newTrailing = highestClose * (1 - trailPct)
+    return Math.max(currentTrailing, newTrailing)
+  }
+  const m = getAdjustedM(atr, highestClose, params.trailAtrN)
+  const newTrailing = highestClose - m * atr
   return Math.max(currentTrailing, newTrailing)
 }
 

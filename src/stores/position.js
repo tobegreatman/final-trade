@@ -28,7 +28,7 @@ export const usePositionStore = defineStore('position', () => {
   }
 
   function addHolding(h) {
-    holdings.value.push({ ...h, id: Date.now() })
+    holdings.value.push({ ...h, id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6) })
     saveHoldings()
   }
 
@@ -37,12 +37,16 @@ export const usePositionStore = defineStore('position', () => {
     saveHoldings()
   }
 
-  function updateTrailingStop(id, newPrice) {
+  function updateTrailingStop(id, newTrailingStop) {
     const h = holdings.value.find(h => h.id === id)
-    if (h && newPrice > h.trailingStop) {
-      h.trailingStop = newPrice
+    if (!h) return false
+    const current = h.trailingStop ?? 0
+    if (newTrailingStop > current) {
+      h.trailingStop = newTrailingStop
       saveHoldings()
+      return true
     }
+    return false
   }
 
   const industryConcentration = computed(() => {

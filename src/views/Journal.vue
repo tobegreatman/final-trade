@@ -180,8 +180,8 @@
           <div class="stat-card__value">{{ journalStore.stats.winRate }}%</div>
         </div>
         <div class="stat-card card">
-          <div class="stat-card__label">盈亏比</div>
-          <div class="stat-card__value">{{ journalStore.stats.rr }}</div>
+          <div class="stat-card__label">利润因子</div>
+          <div class="stat-card__value">{{ journalStore.stats.profitFactor }}</div>
         </div>
         <div class="stat-card card">
           <div class="stat-card__label">总盈亏</div>

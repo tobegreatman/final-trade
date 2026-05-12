@@ -19,7 +19,7 @@ export const useJournalStore = defineStore('journal', () => {
   function addTrade(trade) {
     trades.value.push({
       ...trade,
-      id: Date.now(),
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       status: 'open',
       sellPrice: null,
       sellDate: null,
@@ -38,11 +38,11 @@ export const useJournalStore = defineStore('journal', () => {
 
   function closeTrade(id, closeData) {
     const t = trades.value.find(t => t.id === id)
-    if (!t) return
+    if (!t || t.status !== 'open') return
     const sellPrice = closeData.sellPrice
     const pnl = (sellPrice - t.buyPrice) * t.quantity
-    const pnlPct = ((sellPrice - t.buyPrice) / t.buyPrice) * 100
-    const risk = t.buyPrice - t.stopPrice
+    const pnlPct = t.buyPrice > 0 ? ((sellPrice - t.buyPrice) / t.buyPrice) * 100 : 0
+    const risk = t.buyPrice - (t.stopPrice || 0)
     const actualRR = risk > 0 ? ((sellPrice - t.buyPrice) / risk) : 0
 
     Object.assign(t, {
@@ -73,7 +73,7 @@ export const useJournalStore = defineStore('journal', () => {
   const stats = computed(() => {
     const closed = closedTrades.value
     if (!closed.length) {
-      return { winRate: 0, rr: 0, totalPnl: 0, avgWin: 0, avgLoss: 0, count: 0 }
+      return { winRate: 0, profitFactor: 0, totalPnl: 0, avgWin: 0, avgLoss: 0, count: 0 }
     }
     const wins = closed.filter(t => t.pnl > 0)
     const losses = closed.filter(t => t.pnl <= 0)
@@ -81,7 +81,7 @@ export const useJournalStore = defineStore('journal', () => {
     const totalLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0))
     return {
       winRate: Math.round((wins.length / closed.length) * 100),
-      rr: totalLoss > 0 ? Math.round((totalWin / totalLoss) * 100) / 100 : 0,
+      profitFactor: totalLoss > 0 ? Math.round((totalWin / totalLoss) * 100) / 100 : 0,
       totalPnl: Math.round(closed.reduce((s, t) => s + t.pnl, 0) * 100) / 100,
       avgWin: wins.length ? Math.round(wins.reduce((s, t) => s + t.pnlPct, 0) / wins.length * 100) / 100 : 0,
       avgLoss: losses.length ? Math.round(losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length * 100) / 100 : 0,
@@ -93,7 +93,7 @@ export const useJournalStore = defineStore('journal', () => {
   const consecutiveStops = computed(() => {
     let count = 0
     for (let i = closedTrades.value.length - 1; i >= 0; i--) {
-      if (closedTrades.value[i].pnl <= 0) count++
+      if (closedTrades.value[i].pnl < 0) count++
       else break
     }
     return count

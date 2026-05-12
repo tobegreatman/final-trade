@@ -60,7 +60,7 @@
             </div>
             <div class="orb-meta__row">
               <span class="orb-meta__key">推荐策略</span>
-              <span class="orb-meta__val">{{ judgment?.strategy || '--' }}</span>
+              <span class="orb-meta__val">{{ judgment?.strategyName || '--' }}</span>
             </div>
             <div class="orb-meta__row">
               <span class="orb-meta__key">信号确认</span>
@@ -137,7 +137,7 @@
         <h2 class="panel-title">
           <span class="title-icon">☐</span>
           交易前检查清单
-          <span class="checklist-progress">{{ checkedCount }}/9</span>
+          <span class="checklist-progress">{{ checkedCount }}/{{ checklist.length }}</span>
         </h2>
         <div class="checklist-grid">
           <label
@@ -176,7 +176,7 @@ const checkedCount = computed(() => checklist.filter(c => c.checked).length)
 
 const judgment = computed(() => {
   if (!marketStore.indices || !marketStore.breadth || !marketStore.northbound) return null
-  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound)
+  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound, marketStore.margin, marketStore.limitStats)
 })
 
 const indexIntraday = ref({ sh: null, sz: null, cyb: null })
@@ -213,8 +213,8 @@ const orbClass = computed(() => {
 
 const positionClass = computed(() => {
   const s = judgment.value?.status
-  if (s === 'bull') return 'pos-bull'
-  if (s === 'bear') return 'pos-bear'
+  if (s === 'bull' || s === 'bull-lean') return 'pos-bull'
+  if (s === 'bear' || s === 'bear-lean') return 'pos-bear'
   return ''
 })
 
@@ -240,7 +240,7 @@ let intradayTimer = null
 function startIntradayTimer() {
   if (intradayTimer) return
   fetchIndexIntraday()
-  intradayTimer = setInterval(fetchIndexIntraday, 30000)
+  intradayTimer = setInterval(fetchIndexIntraday, 10000)
 }
 
 function stopIntradayTimer() {

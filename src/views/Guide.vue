@@ -97,12 +97,12 @@
         <div class="strategy-table">
           <table>
             <thead>
-              <tr><th>策略</th><th>适用市场</th><th>持有期</th><th>风险等级</th><th>收益预期</th></tr>
+              <tr><th>策略</th><th>适用市场</th><th>持有期</th><th>风险等级</th><th>仓位上限</th><th>收益预期</th></tr>
             </thead>
             <tbody>
-              <tr><td>趋势突破</td><td>牛市/强趋势</td><td>1-4周</td><td>中</td><td>高</td></tr>
-              <tr><td>回调买入</td><td>震荡上行</td><td>2-8周</td><td>低-中</td><td>中-高</td></tr>
-              <tr><td>底部右侧确认</td><td>熊转牛初期</td><td>1-6月</td><td>高</td><td>极高</td></tr>
+              <tr><td>趋势突破</td><td>牛市/强趋势</td><td>1-4周</td><td>中</td><td>25%</td><td>高</td></tr>
+              <tr><td>回调买入</td><td>震荡上行</td><td>2-8周</td><td>低-中</td><td>25%</td><td>中-高</td></tr>
+              <tr><td>底部右侧确认</td><td>熊转牛初期</td><td>1-6月</td><td>高</td><td>3%</td><td>极高</td></tr>
             </tbody>
           </table>
         </div>
@@ -130,13 +130,13 @@
           </div>
         </div>
 
-        <h3 class="sub-title">跟踪止盈（只上移不下调）</h3>
+        <h3 class="sub-title">跟踪止盈（只上移不下调，ATR 动态）</h3>
         <div class="formula-block">
-          <code>跟踪止盈价 = max(昨日止盈价, 最高收盘价 × (1 − 回撤比例))</code>
+          <code>跟踪止盈价 = max(昨日止盈价, 最高收盘价 − M × ATR(14))</code>
           <div class="formula-params">
-            <span>趋势突破: 回撤 8%</span>
-            <span>回调买入: 回撤 15%</span>
-            <span>底部确认: 回撤 20%</span>
+            <span>趋势突破: M = 2.0</span>
+            <span>回调买入: M = 3.0</span>
+            <span>底部确认: M = 4.0</span>
           </div>
         </div>
 
@@ -277,17 +277,17 @@ const buyDecisionTree = [
 
 const marketDimensions = [
   { name: '均线系统', source: 'MA20/60/120 多空排列', bull: '多头排列', bear: '空头排列' },
-  { name: '价格 vs MA60', source: '指数收盘价与 MA60 关系', bull: '站上 MA60 且 MA60 拐头向上', bear: '跌破 MA60' },
+  { name: '价格 vs MA60', source: '指数收盘价与 MA60 关系', bull: '站上 MA60 且 MA60 拐头向上', bear: '跌破 MA60 且 MA60 拐头向下' },
   { name: '创新高/低', source: '近 20 日新高新低家数', bull: '新高/新低 > 2', bear: '新低/新高 > 2' },
   { name: '涨跌家数', source: '沪深两市实时涨跌统计', bull: '上涨/下跌 > 2', bear: '下跌/上涨 > 2' },
-  { name: '成交量趋势', source: '5 日均量 vs 20 日均量', bull: '> 1.0 放量', bear: '—' },
-  { name: '北向资金', source: '近 5 日净流入', bull: '≥ 4 日净流入', bear: '≤ 1 日净流入' }
+  { name: '成交额', source: '两市近5日均额 vs 20日均额', bull: '持续放大', bear: '持续萎缩' },
+  { name: '北向资金', source: '近 5 日净流入', bull: '连续5日净流入', bear: '连续5日净流出' }
 ]
 
 const marketStatusTable = [
   { status: '牛市', tag: 'bull', condition: '≥ 4 个牛信号', position: '80-100%', strategy: '趋势突破', color: 'var(--red)' },
   { status: '偏多', tag: 'bull-lean', condition: '≥ 3 个牛信号', position: '50-70%', strategy: '回调买入', color: 'var(--red)' },
-  { status: '震荡', tag: 'neutral', condition: '其他', position: '50-70%', strategy: '回调买入', color: 'var(--text-secondary)' },
+  { status: '震荡', tag: 'neutral', condition: '其他', position: '≤50%', strategy: '回调买入', color: 'var(--text-secondary)' },
   { status: '偏空', tag: 'bear-lean', condition: '≥ 3 个熊信号', position: '20-40%', strategy: '仅观望', color: 'var(--green)' },
   { status: '熊市', tag: 'bear', condition: '≥ 4 个熊信号', position: '0-20%', strategy: '空仓', color: 'var(--green)' }
 ]
@@ -295,28 +295,28 @@ const marketStatusTable = [
 const longWindowChecks = [
   { label: '指数收盘价 > MA60', desc: '指数站上60日均线' },
   { label: 'MA60 连续 3 天拐头向上', desc: '中期趋势转强确认' },
-  { label: '涨跌比 > 1.5', desc: '市场广度健康' }
+  { label: '涨跌比 > 2', desc: '市场广度健康' }
 ]
 
 const strategies = [
   {
     name: '趋势突破买入法',
-    tag: 'N=1.5 | 回撤8% | 1-4周',
+    tag: 'N=1.5 | 跟踪止盈2×ATR | 1-4周 | 上限25%',
     conditions: [
       '收盘价突破20日最高价 + 放量确认（量>20日均量×1.5）',
       'MACD金叉 + MACD柱>0',
-      '大盘非熊市',
+      '大盘处于牛市确认或偏多状态',
       '基本面符合 + 未触发排雷',
       '盈亏比 ≥ 2:1'
     ],
-    position: '首批50% → 回踩确认+30% → 加速+20%',
-    stop: '买入价 − 1.5×ATR(14)',
-    market: '牛市/强趋势',
+    position: '首批40% → 回踩确认+30% → 加速+20%（预留10%机动）',
+    stop: '买入价 − 1.5×ATR(14)（高波动N+0.5，低波动N−0.5）',
+    market: '牛市确认/偏多',
     timeStop: '5日未突破前高→出场'
   },
   {
     name: '回调买入法',
-    tag: 'N=2.0 | 回撤15% | 2-8周',
+    tag: 'N=2.0 | 跟踪止盈3×ATR | 2-8周 | 上限25%',
     conditions: [
       '收盘价 > MA60 且 MA60拐头向上',
       '回调至MA20或MA60附近（±2%）',
@@ -324,25 +324,27 @@ const strategies = [
       '出现企稳K线（锤子线/吞没/十字星）',
       '盈亏比 ≥ 2:1'
     ],
-    position: '首批60% → 反弹突破+40%',
-    stop: '支撑位下方 2×ATR(14)',
+    position: '首批50% → 反弹突破+30%（预留20%机动）',
+    stop: '买入价 − 2.0×ATR(14)（高波动N+0.5，低波动N−0.5）',
     market: '震荡上行',
     timeStop: '8日未企稳→出场'
   },
   {
     name: '底部右侧确认买入法',
-    tag: 'N=3.0 | 回撤20% | 1-6月 | 实盘≤5%',
+    tag: 'N=3.0 | 跟踪止盈4×ATR | 1-6月 | 上限3%',
     conditions: [
       '【必选】从高点跌幅 > 40%',
       '【必选】出现底部形态（早晨之星/W底等）',
       '【必选】大盘同期见底企稳',
-      '【加分】地量后放量',
+      '【必选】连续2年未亏损（排除退市风险）',
+      '【加分】地量后放量（量>2×均量）',
       '【加分】RSI从<30拐头向上',
       '【加分】基本面催化剂',
-      '【加分】MACD零轴下金叉'
+      '【加分】MACD零轴下金叉',
+      '⚠ 入场条件：4项必选全满足 + 4项加分中至少满足2项（共≥6项）'
     ],
     position: '30% → 30% → 40%（分三批）',
-    stop: '买入价 − 3×ATR(14)',
+    stop: '买入价 − 3×ATR(14)，跌幅>8%无条件出场',
     market: '熊转牛初期',
     timeStop: '15日未确认→出场'
   }
@@ -359,7 +361,7 @@ const otherStops = [
   { label: '技术止损', desc: '跌破关键支撑位（均线/前低/趋势线）' },
   { label: '时间止损', desc: '买入后N日未按预期运行' },
   { label: '逻辑止损', desc: '买入逻辑被证伪（业绩暴雷、政策转向）' },
-  { label: '总仓位止损', desc: '总回撤>10%减至半仓，>15%空仓休息' }
+  { label: '总仓位止损', desc: '总回撤>10%减至半仓，>20%空仓休息' }
 ]
 
 const ironRules = IRON_RULES

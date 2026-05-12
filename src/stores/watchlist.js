@@ -8,6 +8,7 @@ export const useWatchlistStore = defineStore('watchlist', () => {
   const quotes = ref({})
   const klineCache = ref({})
   let refreshTimer = null
+  let visibilityHandler = null
 
   function loadStocks() {
     try {
@@ -29,6 +30,12 @@ export const useWatchlistStore = defineStore('watchlist', () => {
 
   function removeStock(code) {
     stocks.value = stocks.value.filter(s => s.code !== code)
+    saveStocks()
+  }
+
+  function reorderStock(fromIdx, toIdx) {
+    const item = stocks.value.splice(fromIdx, 1)[0]
+    stocks.value.splice(toIdx, 0, item)
     saveStocks()
   }
 
@@ -59,10 +66,21 @@ export const useWatchlistStore = defineStore('watchlist', () => {
     return null
   }
 
-  function startAutoRefresh(interval = 30000) {
+  function startAutoRefresh(interval = 10000) {
     stopAutoRefresh()
     fetchQuotes()
     refreshTimer = setInterval(fetchQuotes, interval)
+    visibilityHandler = () => {
+      if (document.hidden) {
+        if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
+      } else {
+        if (!refreshTimer) {
+          fetchQuotes()
+          refreshTimer = setInterval(fetchQuotes, interval)
+        }
+      }
+    }
+    document.addEventListener('visibilitychange', visibilityHandler)
   }
 
   function stopAutoRefresh() {
@@ -70,11 +88,15 @@ export const useWatchlistStore = defineStore('watchlist', () => {
       clearInterval(refreshTimer)
       refreshTimer = null
     }
+    if (visibilityHandler) {
+      document.removeEventListener('visibilitychange', visibilityHandler)
+      visibilityHandler = null
+    }
   }
 
   return {
     stocks, quotes, klineCache, codes,
-    addStock, removeStock, fetchQuotes, fetchKline,
+    addStock, removeStock, reorderStock, fetchQuotes, fetchKline,
     startAutoRefresh, stopAutoRefresh
   }
 })

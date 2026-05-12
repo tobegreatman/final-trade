@@ -44,8 +44,14 @@ function draw() {
   if (prices.length < 2) return
 
   const slots = props.totalSlots > prices.length ? props.totalSlots : prices.length
-  const min = Math.min(...prices)
-  const max = Math.max(...prices)
+  const dataMin = Math.min(...prices)
+  const dataMax = Math.max(...prices)
+  let min = dataMin
+  let max = dataMax
+  if (props.refPrice != null) {
+    min = Math.min(min, props.refPrice)
+    max = Math.max(max, props.refPrice)
+  }
   const range = max - min || 1
   const padY = props.showArea ? h * 0.15 : h * 0.1
   const drawH = h - padY * 2
@@ -58,7 +64,7 @@ function draw() {
   }))
 
   // 参考线
-  if (props.refPrice != null && props.refPrice >= min && props.refPrice <= max) {
+  if (props.refPrice != null) {
     const refY = padY + drawH - ((props.refPrice - min) / range) * drawH
     ctx.strokeStyle = 'rgba(255,255,255,0.15)'
     ctx.lineWidth = 0.5
@@ -94,8 +100,8 @@ function draw() {
 
   // 高低价标注 (showArea 模式)
   if (props.showArea && prices.length > 10) {
-    const maxIdx = prices.indexOf(max)
-    const minIdx = prices.indexOf(min)
+    const maxIdx = prices.indexOf(dataMax)
+    const minIdx = prices.indexOf(dataMin)
     ctx.font = '10px sans-serif'
     ctx.fillStyle = '#94a3b8'
     ctx.textAlign = maxIdx / prices.length > 0.8 ? 'right' : 'left'

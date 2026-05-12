@@ -117,8 +117,9 @@
             <thead>
               <tr>
                 <th>策略</th>
-                <th>ATR乘数</th>
-                <th>回撤比例</th>
+                <th>ATR乘数N</th>
+                <th>跟踪止盈M</th>
+                <th>仓位上限</th>
                 <th>持有期</th>
                 <th>时间止损</th>
               </tr>
@@ -127,7 +128,8 @@
               <tr v-for="(p, key) in strategyParams" :key="key">
                 <td>{{ p.name }}</td>
                 <td>{{ p.atrN }}</td>
-                <td>{{ (p.trailPct * 100).toFixed(0) }}%</td>
+                <td>{{ p.trailAtrN }}×ATR</td>
+                <td>{{ (p.maxPosition * 100).toFixed(0) }}%</td>
                 <td>{{ p.holdPeriod }}</td>
                 <td style="font-size: 12px;">{{ p.timeStop }}</td>
               </tr>
@@ -225,9 +227,9 @@ const capitalWan = computed(() => (positionStore.totalCapital / 10000).toFixed(0
 const results = computed(() => {
   if (!form.buyPrice || !form.atr || !form.targetPrice) return null
   const stopPrice = calcStopLoss(form.buyPrice, form.atr, form.strategy)
-  const pos = calcPosition(positionStore.totalCapital, form.buyPrice, stopPrice)
+  const pos = calcPosition(positionStore.totalCapital, form.buyPrice, stopPrice, form.strategy)
   const rr = calcRiskReward(form.buyPrice, stopPrice, form.targetPrice)
-  const trailStop = calcTrailingStop(form.buyPrice, form.strategy)
+  const trailStop = calcTrailingStop(form.buyPrice, form.atr, form.strategy)
   const stopPct = ((form.buyPrice - stopPrice) / form.buyPrice) * 100
   return { stopPrice, posPct: pos.pct, posAmount: pos.amount, shares: pos.shares, rr, trailStop, stopPct }
 })
