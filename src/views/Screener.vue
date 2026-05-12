@@ -1,0 +1,593 @@
+<template>
+  <div class="screener page">
+    <h1 class="page-title">选股筛选</h1>
+    <p class="page-desc">四层漏斗式选股，生成东方财富可用筛选条件</p>
+
+    <!-- Layer 1: Mine sweeper -->
+    <section class="layer-card">
+      <div class="layer-header" @click="toggleLayer(1)">
+        <div class="layer-num">1</div>
+        <div class="layer-info">
+          <h3>排雷清单</h3>
+          <span class="layer-sub">已勾选 {{ minesChecked }}/10（至少5项）</span>
+        </div>
+        <span class="layer-toggle">{{ openLayer === 1 ? '▾' : '▸' }}</span>
+      </div>
+      <div v-if="openLayer === 1" class="layer-body">
+        <div class="mine-grid">
+          <label v-for="m in mines" :key="m.id" class="mine-item" :class="{ checked: m.checked }">
+            <input type="checkbox" v-model="m.checked" />
+            <span class="mine-check">{{ m.checked ? '✓' : '' }}</span>
+            <span class="mine-label">{{ m.label }}</span>
+            <span class="mine-badge" :class="m.auto ? 'auto' : 'manual'">{{ m.auto ? '自动' : 'F10' }}</span>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <!-- Layer 2: Fundamentals -->
+    <section class="layer-card">
+      <div class="layer-header" @click="toggleLayer(2)">
+        <div class="layer-num">2</div>
+        <div class="layer-info">
+          <h3>基本面筛选</h3>
+          <span class="layer-sub">7 项核心指标</span>
+        </div>
+        <span class="layer-toggle">{{ openLayer === 2 ? '▾' : '▸' }}</span>
+      </div>
+      <div v-if="openLayer === 2" class="layer-body">
+        <div class="fund-grid">
+          <div v-for="f in fundFields" :key="f.key" class="fund-field">
+            <label class="fund-label">{{ f.label }}</label>
+            <div class="fund-input-row">
+              <select v-if="f.type === 'bool'" v-model="fundamentals[f.key]">
+                <option :value="true">正值</option>
+                <option :value="false">不限</option>
+              </select>
+              <template v-else>
+                <input type="number" v-model.number="fundamentals[f.key]" :placeholder="f.hint" />
+                <span class="fund-unit">{{ f.unit }}</span>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Layer 3: Prosperity -->
+    <section class="layer-card">
+      <div class="layer-header" @click="toggleLayer(3)">
+        <div class="layer-num">3</div>
+        <div class="layer-info">
+          <h3>景气度验证</h3>
+          <span class="layer-sub">3 选 1（可选）</span>
+        </div>
+        <span class="layer-toggle">{{ openLayer === 3 ? '▾' : '▸' }}</span>
+      </div>
+      <div v-if="openLayer === 3" class="layer-body">
+        <div class="option-cards">
+          <div
+            v-for="opt in prosperityOptions"
+            :key="opt.key"
+            class="option-card"
+            :class="{ active: selectedProsperity === opt.key }"
+            @click="selectedProsperity = selectedProsperity === opt.key ? null : opt.key"
+          >
+            <div class="option-card__radio">
+              <span v-if="selectedProsperity === opt.key" class="radio-dot"></span>
+            </div>
+            <div>
+              <div class="option-card__name">{{ opt.label }}</div>
+              <div class="option-card__desc">{{ opt.desc }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Layer 4: Tech Signal -->
+    <section class="layer-card">
+      <div class="layer-header" @click="toggleLayer(4)">
+        <div class="layer-num">4</div>
+        <div class="layer-info">
+          <h3>技术信号</h3>
+          <span class="layer-sub">3 选 1（可选）</span>
+        </div>
+        <span class="layer-toggle">{{ openLayer === 4 ? '▾' : '▸' }}</span>
+      </div>
+      <div v-if="openLayer === 4" class="layer-body">
+        <div class="option-cards">
+          <div
+            v-for="opt in techOptions"
+            :key="opt.key"
+            class="option-card"
+            :class="{ active: selectedTech === opt.key }"
+            @click="selectedTech = selectedTech === opt.key ? null : opt.key"
+          >
+            <div class="option-card__radio">
+              <span v-if="selectedTech === opt.key" class="radio-dot"></span>
+            </div>
+            <div>
+              <div class="option-card__name">{{ opt.label }}</div>
+              <div class="option-card__desc">{{ opt.desc }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Output -->
+    <section class="output-section" v-if="canGenerate">
+      <h2 class="section-title">筛选条件输出</h2>
+
+      <!-- Natural language -->
+      <div class="output-block">
+        <div class="output-header">
+          <span class="output-type">自然语言选股语句</span>
+          <button class="btn btn-sm btn-ghost" @click="copy(nlStatement)">复制</button>
+        </div>
+        <pre class="output-code">{{ nlStatement }}</pre>
+      </div>
+
+      <!-- PC formula -->
+      <div class="output-block">
+        <div class="output-header">
+          <span class="output-type">PC 端公式代码</span>
+          <button class="btn btn-sm btn-ghost" @click="copy(pcFormula)">复制</button>
+        </div>
+        <pre class="output-code">{{ pcFormula }}</pre>
+      </div>
+
+      <!-- F10 reminders -->
+      <div v-if="f10Reminders.length" class="f10-section">
+        <h3 class="f10-title">仍需 F10 手动复核</h3>
+        <div class="f10-list">
+          <div v-for="r in f10Reminders" :key="r.id" class="f10-item">
+            <span class="f10-icon">!</span>
+            <span>{{ r.label }} — {{ r.desc }}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, computed } from 'vue'
+import { MINE_SWEEPER_ITEMS, FUNDAMENTAL_DEFAULTS, PROSPERITY_OPTIONS, TECH_SIGNAL_OPTIONS } from '../utils/constants.js'
+
+const openLayer = ref(1)
+const mines = reactive(MINE_SWEEPER_ITEMS.map(m => ({ ...m, checked: m.auto })))
+const fundamentals = reactive({ ...FUNDAMENTAL_DEFAULTS })
+const selectedProsperity = ref(null)
+const selectedTech = ref(null)
+
+const prosperityOptions = PROSPERITY_OPTIONS
+const techOptions = TECH_SIGNAL_OPTIONS
+
+const fundFields = [
+  { key: 'roe', label: 'ROE', unit: '%', hint: '12' },
+  { key: 'revenueGrowth', label: '营收增速', unit: '%', hint: '10' },
+  { key: 'profitGrowth', label: '利润增速', unit: '%', hint: '10' },
+  { key: 'debtRatio', label: '资产负债率 ≤', unit: '%', hint: '60' },
+  { key: 'cashflowPositive', label: '经营现金流', type: 'bool' },
+  { key: 'peMin', label: 'PE 下限', unit: '', hint: '5' },
+  { key: 'peMax', label: 'PE 上限', unit: '', hint: '40' }
+]
+
+const minesChecked = computed(() => mines.filter(m => m.checked).length)
+
+const canGenerate = computed(() => minesChecked.value >= 5)
+
+const nlStatement = computed(() => {
+  if (!canGenerate.value) return ''
+  const parts = []
+  // Auto mines
+  if (mines[0].checked) parts.push('非ST')
+  if (mines[1].checked) parts.push('非停牌')
+  if (mines[2].checked) parts.push('审计意见为标准无保留意见')
+  if (mines[3].checked) parts.push('商誉占净资产比例小于30%')
+  if (mines[4].checked) parts.push('大股东质押比例小于60%')
+  if (mines[5].checked) parts.push('上市天数大于250天')
+  // Fundamentals
+  if (fundamentals.roe) parts.push(`ROE大于${fundamentals.roe}%`)
+  if (fundamentals.revenueGrowth) parts.push(`营收同比增长大于${fundamentals.revenueGrowth}%`)
+  if (fundamentals.profitGrowth) parts.push(`净利润同比增长大于${fundamentals.profitGrowth}%`)
+  if (fundamentals.debtRatio) parts.push(`资产负债率小于${fundamentals.debtRatio}%`)
+  if (fundamentals.cashflowPositive) parts.push('经营现金流为正')
+  if (fundamentals.peMin || fundamentals.peMax) parts.push(`市盈率${fundamentals.peMin || 0}到${fundamentals.peMax || 999}`)
+  parts.push('流通市值大于30亿')
+
+  // Prosperity
+  if (selectedProsperity.value === 'institutional') {
+    parts.push('机构持股比例较上季度增加且北向资金持股比例增加且近30日主力净流入')
+  } else if (selectedProsperity.value === 'earnings') {
+    parts.push('最新报告期净利润同比增长大于30%且营收同比增长大于20%且近60日研报数量大于3')
+  } else if (selectedProsperity.value === 'dragonTiger') {
+    parts.push('近3日龙虎榜上榜且买方机构席位数量大于卖方机构席位且换手率大于3%小于20%且流通市值大于30亿')
+  }
+
+  // Tech
+  if (selectedTech.value === 'trendBreak') {
+    parts.push('今天放量突破20日高点且MACD金叉且MACD柱为正且20日均线向上且60日均线向上')
+  } else if (selectedTech.value === 'pullback') {
+    parts.push('股价在60日均线上方且60日均线向上且近5日缩量回调至20日均线附近且今日成交量为近20日最低')
+  } else if (selectedTech.value === 'bottomConfirm') {
+    parts.push('股价从半年高点下跌超过40%且近5日成交量萎缩后今日放量且RSI从30以下拐头向上且MACD金叉')
+  }
+
+  return parts.join('且')
+})
+
+const pcFormula = computed(() => {
+  if (!canGenerate.value) return ''
+  const lines = []
+  if (mines[0].checked) lines.push('NOT(NAMELIKE("ST") OR NAMELIKE("*ST"))')
+  if (mines[1].checked) lines.push('DYNAINFO(17)>0')
+  if (fundamentals.roe) lines.push(`FINANCE(33)/FINANCE(34)*100>=${fundamentals.roe}`)
+  if (fundamentals.profitGrowth) lines.push(`FINANCE(43)>=${fundamentals.profitGrowth}`)
+  if (fundamentals.debtRatio) lines.push(`FINANCE(9)<=${fundamentals.debtRatio}`)
+
+  if (selectedTech.value === 'trendBreak') {
+    lines.push('C>REF(HHV(H,20),1) AND V/REF(MA(V,20),1)>1.5 AND MACD.DIF>MACD.DEA AND MACD.MACD>0 AND MA(C,20)>MA(C,60) AND MA(C,60)>REF(MA(C,60),5)')
+  } else if (selectedTech.value === 'pullback') {
+    lines.push('C>MA(C,60) AND MA(C,60)>REF(MA(C,60),5) AND L<=MA(C,20)*1.02 AND C>=MA(C,20)*0.98 AND MA(V,5)<MA(V,20)*0.7')
+  } else if (selectedTech.value === 'bottomConfirm') {
+    lines.push('HHV(H,120)/C>1.4 AND C/REF(C,1)>1.03 AND V/REF(MA(V,20),1)>2 AND C>O AND (C-O)/O>0.03 AND RSI.RSI1>REF(RSI.RSI1,1) AND REF(RSI.RSI1,5)<30')
+  }
+
+  return lines.length ? lines.join(' AND\n') + ';' : ''
+})
+
+const f10Reminders = computed(() => {
+  return mines.filter(m => !m.auto && m.checked)
+})
+
+function toggleLayer(n) {
+  openLayer.value = openLayer.value === n ? 0 : n
+}
+
+function copy(text) {
+  navigator.clipboard.writeText(text)
+}
+</script>
+
+<style scoped>
+.screener {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.page-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.page-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: -8px;
+}
+
+.layer-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.layer-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 20px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.layer-header:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.layer-num {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-dim);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.layer-info {
+  flex: 1;
+}
+
+.layer-info h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.layer-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.layer-toggle {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.layer-body {
+  padding: 0 20px 20px;
+  border-top: 1px solid var(--border);
+}
+
+.mine-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  padding-top: 16px;
+}
+
+.mine-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid var(--border);
+  transition: all 0.15s;
+  user-select: none;
+}
+
+.mine-item:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.mine-item.checked {
+  border-color: rgba(0, 113, 227, 0.3);
+  background: var(--accent-dim);
+}
+
+.mine-item input {
+  display: none;
+}
+
+.mine-check {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1.5px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.checked .mine-check {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.mine-label {
+  font-size: 13px;
+  flex: 1;
+}
+
+.mine-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.mine-badge.auto {
+  background: var(--green-dim);
+  color: var(--green);
+}
+
+.mine-badge.manual {
+  background: var(--yellow-dim);
+  color: var(--yellow);
+}
+
+.fund-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  padding-top: 16px;
+}
+
+.fund-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fund-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.fund-input-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fund-input-row input,
+.fund-input-row select {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.fund-unit {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 16px;
+}
+
+.option-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 16px;
+}
+
+.option-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.option-card:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.option-card.active {
+  border-color: rgba(0, 113, 227, 0.3);
+  background: var(--accent-dim);
+}
+
+.option-card__radio {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.active .option-card__radio {
+  border-color: var(--accent);
+}
+
+.radio-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.option-card__name {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.option-card__desc {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.output-section {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 24px;
+}
+
+.output-block {
+  margin-bottom: 16px;
+}
+
+.output-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.output-type {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.output-code {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: var(--font-mono);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.f10-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.f10-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--yellow);
+  margin-bottom: 8px;
+}
+
+.f10-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.f10-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.f10-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--yellow-dim);
+  color: var(--yellow);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .mine-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .fund-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
