@@ -3,10 +3,16 @@ import Router from '@koa/router'
 import cors from '@koa/cors'
 import logger from 'koa-logger'
 import https from 'https'
-import dns from 'dns'
 
-// 强制 IPv4，东方财富 IPv6 服务不稳定
-dns.setDefaultResultOrder('ipv4first')
+// 交易日期：9点前视为前一交易日，9点后视为当日
+function getTradeDate() {
+  const now = new Date()
+  if (now.getHours() < 9) now.setDate(now.getDate() - 1)
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  return `${y}${m}${d}`
+}
 
 const app = new Koa()
 const router = new Router()
@@ -47,7 +53,7 @@ function syntheticIntraday(open, high, low, close) {
 
 // 从 K 线获取最近一根的 OHLC 并合成分时
 async function fallbackIntradayFromKline(secid) {
-  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=1&end=20500101&lmt=2`
+  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=1&end=${getTradeDate()}&lmt=2`
   const data = await fetchJSON(url)
   const klines = data.data?.klines || []
   if (!klines.length) return null
@@ -79,7 +85,6 @@ async function fetchJSON(url) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return await res.json()
   } catch (e) {
-    // undici fetch 对部分接口有 socket 兼容性问题，回退到 https 模块
     return fetchJSONviaHttps(url)
   }
 }
@@ -115,44 +120,42 @@ const INDEX_SECIDS = {
 router.get('/api/market/indices', async (ctx) => {
   try {
     // 获取三大指数实时行情
-    const quoteUrl = `https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=${INDEX_SECIDS.sh},${INDEX_SECIDS.sz},${INDEX_SECIDS.cyb}&fields=f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21`
+    const quoteUrl = `https://push2his.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=${INDEX_SECIDS.sh},${INDEX_SECIDS.sz},${INDEX_SECIDS.cyb}&fields=f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21`
     const quoteData = await fetchJSON(quoteUrl)
 
-    // 获取 120 日 K 线 (每个指数)
+    // 获取 120 日 K 线 (每个指数) — 串行请求避免触发限流
     const indices = {}
-    const klinePromises = Object.entries({ sh: '1.000001', sz: '0.399001', cyb: '0.399006' }).map(async ([key, secid]) => {
-      const klineUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=20500101&lmt=120`
-      const kd = await fetchJSON(klineUrl)
+    for (const [key, secid] of Object.entries({ sh: '1.000001', sz: '0.399001', cyb: '0.399006' })) {
       indices[key] = { quote: null, klines: [], ma: {} }
-      if (kd.data && kd.data.klines) {
-        indices[key].klines = kd.data.klines.map(line => {
-          const p = line.split(',')
-          return { date: p[0], open: +p[1], close: +p[2], high: +p[3], low: +p[4], volume: +p[5], amount: +p[6] }
-        })
-        // 计算 MA
-        const closes = indices[key].klines.map(k => k.close)
-        const calcMA = (arr, n) => {
-          if (arr.length < n) return null
-          const slice = arr.slice(-n)
-          return slice.reduce((a, b) => a + b, 0) / n
-        }
-        indices[key].ma = {
-          ma20: calcMA(closes, 20),
-          ma60: calcMA(closes, 60),
-          ma120: calcMA(closes, 120)
-        }
-        // MA60 四日趋势
-        if (closes.length >= 63) {
-          const ma60_4days = []
-          for (let i = 0; i < 4; i++) {
-            const s = closes.length - 60 - (3 - i)
-            ma60_4days.push(closes.slice(s, s + 60).reduce((a, b) => a + b, 0) / 60)
+      try {
+        const klineUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=${getTradeDate()}&lmt=120`
+        const kd = await fetchJSON(klineUrl)
+        if (kd.data && kd.data.klines) {
+          indices[key].klines = kd.data.klines.map(line => {
+            const p = line.split(',')
+            return { date: p[0], open: +p[1], close: +p[2], high: +p[3], low: +p[4], volume: +p[5], amount: +p[6] }
+          })
+          const closes = indices[key].klines.map(k => k.close)
+          const calcMA = (arr, n) => {
+            if (arr.length < n) return null
+            return arr.slice(-n).reduce((a, b) => a + b, 0) / n
           }
-          indices[key].ma60Trend = ma60_4days
+          indices[key].ma = {
+            ma20: calcMA(closes, 20),
+            ma60: calcMA(closes, 60),
+            ma120: calcMA(closes, 120)
+          }
+          if (closes.length >= 63) {
+            const ma60_4days = []
+            for (let i = 0; i < 4; i++) {
+              const s = closes.length - 60 - (3 - i)
+              ma60_4days.push(closes.slice(s, s + 60).reduce((a, b) => a + b, 0) / 60)
+            }
+            indices[key].ma60Trend = ma60_4days
+          }
         }
-      }
-    })
-    await Promise.all(klinePromises)
+      } catch (e) { /* kline 失败不影响行情 */ }
+    }
 
     // 填充实时行情
     if (quoteData.data && quoteData.data.diff) {
@@ -187,10 +190,10 @@ router.get('/api/market/indices', async (ctx) => {
 router.get('/api/market/breadth', async (ctx) => {
   try {
     // 沪市
-    const shUrl = 'https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=1.000001&fields=f104,f105,f106'
+    const shUrl = 'https://push2his.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=1.000001&fields=f104,f105,f106'
     const shData = await fetchJSON(shUrl)
     // 深市
-    const szUrl = 'https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=0.399001&fields=f104,f105,f106'
+    const szUrl = 'https://push2his.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=0.399001&fields=f104,f105,f106'
     const szData = await fetchJSON(szUrl)
 
     const sh = shData.data?.diff?.[0] || {}
@@ -215,9 +218,9 @@ router.get('/api/market/indices/intraday', async (ctx) => {
       ['sz', '0.399001', '深证成指'],
       ['cyb', '0.399006', '创业板指']
     ]
-    const promises = entries.map(async ([key, secid, name]) => {
+    for (const [key, secid, name] of entries) {
       try {
-        const url = `https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1`
+        const url = `https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1`
         const data = await fetchJSON(url)
         const trends = (data.data?.trends || []).map(t => {
           const p = t.split(',')
@@ -230,12 +233,11 @@ router.get('/api/market/indices/intraday', async (ctx) => {
             preClose: data.data?.preClose || 0,
             trends
           }
-          return
+          continue
         }
       } catch (e) { /* trends2 失败，不降级 */ }
       result[key] = { name, code: '', preClose: 0, trends: [] }
-    })
-    await Promise.all(promises)
+    }
     ctx.body = ok(result)
   } catch (e) {
     ctx.body = fail(e.message)
@@ -342,7 +344,7 @@ router.get('/api/stock/:code/kline', async (ctx) => {
   try {
     const code = ctx.params.code
     const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`
-    const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=20500101&lmt=120`
+    const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=${getTradeDate()}&lmt=120`
     const data = await fetchJSON(url)
     const klines = (data.data?.klines || []).map(line => {
       const p = line.split(',')
@@ -361,7 +363,7 @@ router.get('/api/stock/:code/kline5y', async (ctx) => {
   try {
     const code = ctx.params.code
     const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`
-    const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=20500101&lmt=1200`
+    const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=${getTradeDate()}&lmt=1200`
     const data = await fetchJSON(url)
     const klines = (data.data?.klines || []).map(line => {
       const p = line.split(',')
@@ -379,7 +381,7 @@ router.get('/api/stock/:code/intraday', async (ctx) => {
     const code = ctx.params.code
     const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`
     try {
-      const url = `https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1`
+      const url = `https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1`
       const data = await fetchJSON(url)
       const trends = (data.data?.trends || []).map(t => {
         const p = t.split(',')
@@ -409,7 +411,7 @@ router.get('/api/stock/:code/intraday5d', async (ctx) => {
     const code = ctx.params.code
     const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`
     // 取最近 6 根日 K 线（前 5 根合成，第 6 根备用算 preClose）
-    const klineUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=1&end=20500101&lmt=6`
+    const klineUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=1&end=${getTradeDate()}&lmt=6`
     const klineData = await fetchJSON(klineUrl)
     const klines = (klineData.data?.klines || []).map(l => {
       const p = l.split(',')
@@ -420,7 +422,7 @@ router.get('/api/stock/:code/intraday5d', async (ctx) => {
     // 取当天真实分时
     let todayTrends = []
     try {
-      const url = `https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1`
+      const url = `https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1`
       const data = await fetchJSON(url)
       todayTrends = (data.data?.trends || []).map(t => {
         const p = t.split(',')
@@ -459,7 +461,7 @@ router.get('/api/stock/:code/basic', async (ctx) => {
   try {
     const code = ctx.params.code
     const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`
-    const url = `https://push2.eastmoney.com/api/qt/stock/get?secid=${secid}&fields=f43,f44,f45,f46,f47,f48,f57,f58,f116,f117,f162,f167,f170,f171,f173,f184,f186,f187,f188,f190,f191,f192&fltt=2`
+    const url = `https://push2his.eastmoney.com/api/qt/stock/get?secid=${secid}&fields=f43,f44,f45,f46,f47,f48,f57,f58,f116,f117,f162,f167,f170,f171,f173,f184,f186,f187,f188,f190,f191,f192&fltt=2`
     const data = await fetchJSON(url)
     const d = data.data || {}
     ctx.body = ok({
@@ -494,7 +496,7 @@ router.get('/api/stock/batch/quotes', async (ctx) => {
     }
     const codeList = codes.split(',').filter(Boolean)
     const secids = codeList.map(c => c.startsWith('6') ? `1.${c}` : `0.${c}`).join(',')
-    const url = `https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=${secids}&fields=f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21`
+    const url = `https://push2his.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=${secids}&fields=f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21`
     const data = await fetchJSON(url)
     const result = {}
     if (data.data && data.data.diff) {
@@ -538,6 +540,97 @@ router.get('/api/stock/search', async (ctx) => {
         type: item.SecurityTypeName
       }))
     ctx.body = ok(items)
+  } catch (e) {
+    ctx.body = fail(e.message)
+  }
+})
+
+// === Stock Screening (Strategy-based) ===
+// 两步筛选: datacenter 过滤 ROE → clist 获取行情 → 交叉匹配
+router.get('/api/stock/screen', async (ctx) => {
+  try {
+    const strategy = ctx.query.strategy || 'trend'
+    const count = Math.min(parseInt(ctx.query.count) || 10, 20)
+
+    const val = (v) => (typeof v === 'number' ? v : null)
+
+    // 第一步: datacenter 获取 ROE 合格的股票池
+    const roeUrl = 'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_LICO_FN_CPD&columns=SECURITY_CODE,WEIGHTAVG_ROE,SJLTZ,YSTZ&filter=(WEIGHTAVG_ROE%3E12)(WEIGHTAVG_ROE%3C50)(SECURITY_TYPE_CODE%3D%22058001001%22)(ISNEW%3D%221%22)&pageSize=3000&sortColumns=WEIGHTAVG_ROE&sortTypes=-1&source=WEB&client=WEB'
+    const roeData = await fetchJSON(roeUrl)
+    const roeList = roeData.result?.data || []
+    const roeMap = new Map()
+    for (const r of roeList) {
+      roeMap.set(r.SECURITY_CODE, { roe: r.WEIGHTAVG_ROE, profitGrowth: r.SJLTZ, revenueGrowth: r.YSTZ })
+    }
+
+    // 第二步: 获取行情数据
+    const isST = (name) => /ST|退/.test(name || '')
+    let stocks
+
+    if (strategy === 'pullback') {
+      // Pullback: clist 按流通市值排序获取全量，再交叉匹配 ROE 池
+      const fs = 'm:0+t:6+f:!2,m:0+t:80+f:!2,m:1+t:2+f:!2,m:1+t:23+f:!2'
+      const fields = 'f2,f3,f4,f6,f8,f9,f10,f12,f14,f20,f21,f23,f62,f115,f128'
+      const clistUrl = `https://push2his.eastmoney.com/api/qt/clist/get?pn=1&pz=500&np=1&fltt=2&invt=2&fid=f21&po=1&fs=${fs}&fields=${fields}`
+      const clistData = await fetchJSON(clistUrl)
+      const diff = clistData.data?.diff || []
+
+      stocks = diff
+        .filter(s => {
+          if (isST(s.f14)) return false
+          const code = String(s.f12)
+          if (!roeMap.has(code)) return false
+          const cap = val(s.f21) || 0
+          const pe = val(s.f115) || val(s.f9) || 0
+          const turnover = val(s.f8) || 0
+          const change = val(s.f3) || 0
+          return cap > 5e9 && pe > 5 && pe < 40 && turnover > 0.3 && turnover < 10 && change > -5 && change < 5
+        })
+        .slice(0, count)
+    } else {
+      // Trend: clist 按主力净流入排序，交叉匹配 ROE 池
+      const fs = 'm:0+t:6+f:!2,m:0+t:80+f:!2,m:1+t:2+f:!2,m:1+t:23+f:!2'
+      const fields = 'f2,f3,f4,f6,f8,f9,f10,f12,f14,f20,f21,f23,f62,f115,f128'
+      const clistUrl = `https://push2his.eastmoney.com/api/qt/clist/get?pn=1&pz=200&np=1&fltt=2&invt=2&fid=f62&po=1&fs=${fs}&fields=${fields}`
+      const clistData = await fetchJSON(clistUrl)
+      const diff = clistData.data?.diff || []
+
+      stocks = diff
+        .filter(s => {
+          if (isST(s.f14)) return false
+          const code = String(s.f12)
+          if (!roeMap.has(code)) return false
+          const cap = val(s.f21) || 0
+          const pe = val(s.f115) || val(s.f9) || 0
+          const turnover = val(s.f8) || 0
+          return cap > 3e9 && pe > 5 && pe < 80 && turnover > 2
+        })
+        .slice(0, count)
+    }
+
+    // 统一格式化
+    const result = stocks.map(s => {
+        const code = String(s.f12)
+        const fin = roeMap.get(code) || {}
+        return {
+          code,
+          name: s.f14,
+          price: val(s.f2),
+          change: val(s.f3),
+          amount: val(s.f6) ? Math.round(val(s.f6) / 1e4) : null,
+          turnover: val(s.f8),
+          pe: val(s.f115) || val(s.f9),
+          marketCap: val(s.f21) ? Math.round(val(s.f21) / 1e8) : null,
+          pb: val(s.f23),
+          mainFlow: val(s.f62) ? Math.round(val(s.f62) / 1e4) : null,
+          industry: s.f128 || '',
+          roe: fin.roe ? Math.round(fin.roe * 100) / 100 : null,
+          revenueGrowth: fin.revenueGrowth ? Math.round(fin.revenueGrowth * 100) / 100 : null,
+          profitGrowth: fin.profitGrowth ? Math.round(fin.profitGrowth * 100) / 100 : null,
+        }
+      })
+
+    ctx.body = ok({ strategy, stocks: result })
   } catch (e) {
     ctx.body = fail(e.message)
   }

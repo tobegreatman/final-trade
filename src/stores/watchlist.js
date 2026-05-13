@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { REFRESH_INTERVAL } from '../utils/constants.js'
 
 const STORAGE_KEY = 'watchlist'
 
@@ -66,7 +67,7 @@ export const useWatchlistStore = defineStore('watchlist', () => {
     return null
   }
 
-  function startAutoRefresh(interval = 10000) {
+  function startAutoRefresh(interval = REFRESH_INTERVAL) {
     stopAutoRefresh()
     fetchQuotes()
     refreshTimer = setInterval(fetchQuotes, interval)

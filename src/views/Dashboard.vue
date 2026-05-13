@@ -114,7 +114,7 @@
       <section class="long-window-section" v-if="judgment?.longWindow">
         <h2 class="panel-title">
           <span class="title-icon">⚡</span>
-          长窗口速判
+          做多窗口速判
           <span class="lw-badge" :class="judgment.longWindow.allPass ? 'pass' : 'fail'">
             {{ judgment.longWindow.allPass ? '窗口已开启' : '窗口未开启' }}
           </span>
@@ -130,6 +130,71 @@
             <span>{{ cond.label }}</span>
           </div>
         </div>
+      </section>
+
+      <!-- ===== STRATEGY STOCK PICKS ===== -->
+      <section class="strategy-section" v-if="judgment">
+        <h2 class="panel-title">
+          <span class="title-icon">◈</span>
+          策略选股建议
+          <span v-if="activeStrategy" class="strategy-badge" :class="activeStrategy">{{ strategyLabel }}</span>
+        </h2>
+
+        <!-- Bear: no buy -->
+        <div v-if="!activeStrategy" class="strategy-empty">
+          <span class="strategy-empty__icon">⊘</span>
+          <span>当前市场{{ judgment.label }}，建议空仓观望，不推荐开新仓</span>
+        </div>
+
+        <template v-else>
+          <!-- Prompt -->
+          <div class="prompt-block">
+            <div class="prompt-header">
+              <span class="prompt-label">一句话选股提示词</span>
+              <button class="btn btn-sm btn-ghost" @click="copyText(screenerPrompt)">复制</button>
+            </div>
+            <pre class="prompt-code">{{ screenerPrompt }}</pre>
+            <p class="prompt-hint">粘贴到东方财富 App「一句话选股」或 xuangu.eastmoney.com</p>
+          </div>
+
+          <!-- Stock cards -->
+          <div v-if="screenLoading" class="screen-loading">
+            <span class="pulse-dot"></span> 正在获取候选股...
+          </div>
+          <template v-else-if="screenStocks.length">
+            <div class="stock-grid">
+              <div
+                v-for="s in screenStocks"
+                :key="s.code"
+                class="stock-card"
+                @click="goToStock(s.code, s.name)"
+              >
+                <div class="stock-card__header">
+                  <span class="stock-card__name">{{ s.name }}</span>
+                  <span class="stock-card__industry">{{ s.industry }}</span>
+                </div>
+                <div class="stock-card__price">
+                  <span class="stock-card__val">{{ s.price?.toFixed(2) }}</span>
+                  <span class="stock-card__chg" :class="s.change >= 0 ? 'up' : 'down'">
+                    {{ s.change >= 0 ? '+' : '' }}{{ s.change?.toFixed(2) }}%
+                  </span>
+                </div>
+                <div class="stock-card__meta">
+                  <span>PE {{ s.pe?.toFixed(1) }}</span>
+                  <span>PB {{ s.pb?.toFixed(2) }}</span>
+                  <span>换手 {{ s.turnover?.toFixed(1) }}%</span>
+                </div>
+                <div class="stock-card__flow">
+                  <span class="flow-label">主力</span>
+                  <span :class="s.mainFlow >= 0 ? 'up' : 'down'">
+                    {{ fmtFlow(s.mainFlow) }}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <button class="btn btn-sm btn-ghost screen-refresh" @click="fetchScreenStocks">刷新候选</button>
+          </template>
+        </template>
       </section>
 
       <!-- ===== PRE-TRADE CHECKLIST ===== -->
@@ -160,12 +225,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, reactive, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, reactive, onBeforeUnmount, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useMarketStore } from '../stores/market.js'
 import { judgeMarket } from '../utils/marketJudge.js'
-import { PRE_TRADE_CHECKLIST } from '../utils/constants.js'
+import { PRE_TRADE_CHECKLIST, REFRESH_INTERVAL } from '../utils/constants.js'
 import Sparkline from '../components/Sparkline.vue'
 
+const router = useRouter()
 const marketStore = useMarketStore()
 const showSignals = ref(false)
 const showChecklist = ref(false)
@@ -176,8 +243,68 @@ const checkedCount = computed(() => checklist.filter(c => c.checked).length)
 
 const judgment = computed(() => {
   if (!marketStore.indices || !marketStore.breadth || !marketStore.northbound) return null
-  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound, marketStore.margin, marketStore.limitStats)
+  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound, marketStore.margin)
 })
+
+// ==================== Strategy Stock Screening ====================
+const screenLoading = ref(false)
+const screenStocks = ref([])
+
+const activeStrategy = computed(() => {
+  const s = judgment.value?.status
+  if (s === 'bull') return 'trend'
+  if (s === 'bull-lean' || s === 'neutral') return 'pullback'
+  return null
+})
+
+const strategyLabel = computed(() => activeStrategy.value === 'trend' ? '趋势突破' : '回调买入')
+
+const screenerPrompt = computed(() => {
+  const s = judgment.value?.status
+  if (!s || !activeStrategy.value) return ''
+  const base = '非ST，非停牌，非北交所，非退市，上市时间大于1年'
+  if (s === 'bull') {
+    return `${base}，ROE大于12%，营收增长率大于10%，净利润增长率大于10%，市盈率5到40，流通市值大于30亿，MACD金叉，20日均线向上，60日均线向上`
+  }
+  if (s === 'bull-lean') {
+    return `${base}，ROE大于12%，市盈率5到40，资产负债率小于60%，流通市值大于50亿，股价大于60日均线，60日均线向上，股价接近20日均线偏离不超过2%，5日均量小于20日均量的70%`
+  }
+  // neutral
+  return `${base}，ROE大于12%，市盈率5到30，资产负债率小于60%，经营现金流为正，流通市值大于50亿，股价接近20日均线偏离不超过2%，5日均量小于20日均量的70%`
+})
+
+async function fetchScreenStocks() {
+  if (!activeStrategy.value) return
+  screenLoading.value = true
+  try {
+    const res = await fetch(`/api/stock/screen?strategy=${activeStrategy.value}&count=10`)
+    const json = await res.json()
+    if (json.ok) screenStocks.value = json.data.stocks
+  } catch (e) {
+    console.error('fetchScreenStocks error:', e)
+  } finally {
+    screenLoading.value = false
+  }
+}
+
+watch(judgment, (v) => {
+  if (v && activeStrategy.value) fetchScreenStocks()
+})
+
+function fmtFlow(v) {
+  if (v == null) return '--'
+  const abs = Math.abs(v)
+  const str = abs >= 10000 ? (abs / 10000).toFixed(1) + '亿' : abs.toFixed(0) + '万'
+  return (v >= 0 ? '+' : '-') + str
+}
+
+function goToStock(code, name) {
+  router.push({ path: '/watchlist', query: { code, name } })
+}
+
+function copyText(text) {
+  navigator.clipboard.writeText(text)
+}
 
 const indexIntraday = ref({ sh: null, sz: null, cyb: null })
 
@@ -240,7 +367,7 @@ let intradayTimer = null
 function startIntradayTimer() {
   if (intradayTimer) return
   fetchIndexIntraday()
-  intradayTimer = setInterval(fetchIndexIntraday, 10000)
+  intradayTimer = setInterval(fetchIndexIntraday, REFRESH_INTERVAL)
 }
 
 function stopIntradayTimer() {
@@ -908,6 +1035,208 @@ onBeforeUnmount(() => {
   color: var(--text-primary);
 }
 
+/* ===== STRATEGY STOCK PICKS ===== */
+.strategy-section {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+}
+
+.strategy-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  margin-left: 4px;
+}
+
+.strategy-badge.trend {
+  background: var(--red-dim);
+  color: var(--red);
+}
+
+.strategy-badge.pullback {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.strategy-empty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 24px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.strategy-empty__icon {
+  font-size: 20px;
+  opacity: 0.5;
+}
+
+.prompt-block {
+  margin-bottom: 16px;
+}
+
+.prompt-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.prompt-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.prompt-code {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: var(--font-mono);
+  max-height: 100px;
+  overflow-y: auto;
+}
+
+.prompt-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.screen-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 20px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+.stock-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+}
+
+.stock-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s, transform 0.15s;
+}
+
+.stock-card:hover {
+  border-color: rgba(0, 113, 227, 0.3);
+  background: rgba(0, 113, 227, 0.04);
+  transform: translateY(-1px);
+}
+
+.stock-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.stock-card__name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+
+.stock-card__industry {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.stock-card__price {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.stock-card__val {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-card__chg {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-card__chg.up { color: var(--red); }
+.stock-card__chg.down { color: var(--green); }
+
+.stock-card__meta {
+  display: flex;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.stock-card__meta span {
+  background: var(--bg-surface-alt);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.stock-card__flow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+}
+
+.flow-label {
+  color: var(--text-muted);
+}
+
+.stock-card__flow .up { color: var(--red); font-weight: 600; }
+.stock-card__flow .down { color: var(--green); font-weight: 600; }
+
+.screen-refresh {
+  margin-top: 12px;
+  width: 100%;
+}
+
 /* ===== RESPONSIVE ===== */
 @media (max-width: 1024px) {
   .main-grid {
@@ -931,6 +1260,10 @@ onBeforeUnmount(() => {
 
   .lw-conditions {
     grid-template-columns: 1fr;
+  }
+
+  .stock-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
 
   .checklist-grid {

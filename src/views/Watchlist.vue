@@ -130,7 +130,8 @@
               :ref-price="chartRefPrice"
               :total-slots="chartTotalSlots"
             />
-            <div v-else class="chart-loading">加载中...</div>
+            <div v-else-if="detailLoading" class="chart-loading">加载中...</div>
+            <div v-else class="chart-loading">暂无数据</div>
           </div>
 
           <!-- Stats grid -->
@@ -160,6 +161,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useWatchlistStore } from '../stores/watchlist.js'
+import { REFRESH_INTERVAL } from '../utils/constants.js'
 import Sparkline from '../components/Sparkline.vue'
 import KlineChart from '../components/KlineChart.vue'
 
@@ -177,6 +179,7 @@ const indexIntraday = ref({ sh: { name: '上证指数', trends: [], isUp: false,
 
 // Cache for detail data
 const intradayCache = ref({})
+const detailLoading = ref(false)
 const intraday5dCache = ref({})
 const klineCache = ref({})
 const kline5yCache = ref({})
@@ -293,22 +296,33 @@ function addFromSearch(item) {
 
 async function selectStock(code) {
   selectedCode.value = code
-  // Load data
-  if (!klineCache.value[code]) {
-    const res = await fetch(`/api/stock/${code}/kline`)
-    const json = await res.json()
-    if (json.ok && json.data?.klines?.length) klineCache.value[code] = json.data
+  const hasKline = !!klineCache.value[code]
+  const hasIntraday = !!intradayCache.value[code]
+  const hasBasic = !!basicCache.value[code]
+  detailLoading.value = true
+  // Fetch missing data, keep cache on failure
+  if (!hasKline) {
+    try {
+      const res = await fetch(`/api/stock/${code}/kline`)
+      const json = await res.json()
+      if (json.ok && json.data?.klines?.length) klineCache.value[code] = json.data
+    } catch {}
   }
-  if (!intradayCache.value[code]) {
-    const res = await fetch(`/api/stock/${code}/intraday`)
-    const json = await res.json()
-    if (json.ok && json.data?.trends?.length) intradayCache.value[code] = json.data
+  if (!hasIntraday) {
+    try {
+      const res = await fetch(`/api/stock/${code}/intraday`)
+      const json = await res.json()
+      if (json.ok && json.data?.trends?.length) intradayCache.value[code] = json.data
+    } catch {}
   }
-  if (!basicCache.value[code]) {
-    const res = await fetch(`/api/stock/${code}/basic`)
-    const json = await res.json()
-    if (json.ok && json.data) basicCache.value[code] = json.data
+  if (!hasBasic) {
+    try {
+      const res = await fetch(`/api/stock/${code}/basic`)
+      const json = await res.json()
+      if (json.ok && json.data) basicCache.value[code] = json.data
+    } catch {}
   }
+  detailLoading.value = false
   restartIntradayDetailTimer()
 }
 
@@ -389,7 +403,7 @@ let detailIntradayTimer = null
 function startIndexTimer() {
   if (indexTimer) return
   fetchIndexIntraday()
-  indexTimer = setInterval(fetchIndexIntraday, 10000)
+  indexTimer = setInterval(fetchIndexIntraday, REFRESH_INTERVAL)
 }
 
 function stopIndexTimer() {
@@ -410,7 +424,7 @@ function startDetailIntradayTimer() {
   stopDetailIntradayTimer()
   if (!selectedCode.value || activePeriod.value !== '1d') return
   refreshDetailIntraday()
-  detailIntradayTimer = setInterval(refreshDetailIntraday, 10000)
+  detailIntradayTimer = setInterval(refreshDetailIntraday, REFRESH_INTERVAL)
 }
 
 function stopDetailIntradayTimer() {
@@ -437,12 +451,14 @@ function onVisibilityChange() {
 
 onMounted(() => {
   startIndexTimer()
+  watchlistStore.startAutoRefresh(REFRESH_INTERVAL)
   document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onBeforeUnmount(() => {
   stopIndexTimer()
   stopDetailIntradayTimer()
+  watchlistStore.stopAutoRefresh()
   document.removeEventListener('visibilitychange', onVisibilityChange)
   clearTimeout(searchTimer)
 })

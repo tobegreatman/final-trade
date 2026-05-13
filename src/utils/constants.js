@@ -94,15 +94,19 @@ export const EMOTIONS = [
 export const MINE_SWEEPER_ITEMS = [
   { id: 1, label: '非 ST', auto: true, desc: '排除 ST、*ST 股票' },
   { id: 2, label: '非停牌', auto: true, desc: '排除停牌股票' },
-  { id: 3, label: '审计意见：标准无保留', auto: true, desc: '最新审计意见为标准无保留意见' },
-  { id: 4, label: '商誉/净资产 < 30%', auto: true, desc: '商誉占净资产比例小于30%' },
-  { id: 5, label: '大股东质押 < 60%', auto: true, desc: '大股东质押比例小于60%' },
-  { id: 6, label: '上市天数 > 250天', auto: true, desc: '排除次新股' },
-  { id: 7, label: '关联交易/营收 < 40%', auto: false, desc: '关联交易占比过高 → F10查阅' },
-  { id: 8, label: '无存贷双高', auto: false, desc: '货币资金高且有息负债高 → F10查阅' },
-  { id: 9, label: '董监高减持 < 5%', auto: false, desc: '近一年累计减持比例 → F10查阅' },
-  { id: 10, label: '无重大诉讼/处罚', auto: false, desc: '近一年重大事项 → F10查阅' }
+  { id: 3, label: '非北交所', auto: true, desc: '排除北交所股票' },
+  { id: 4, label: '非退市', auto: true, desc: '排除退市风险股（带退字标识）' },
+  { id: 5, label: '审计意见：标准无保留', auto: true, desc: '最新审计意见为标准无保留意见' },
+  { id: 6, label: '商誉/净资产 < 30%', auto: true, desc: '商誉占净资产比例小于30%' },
+  { id: 7, label: '大股东质押 < 60%', auto: true, desc: '大股东质押比例小于60%' },
+  { id: 8, label: '上市天数 > 250天', auto: true, desc: '排除次新股' },
+  { id: 9, label: '关联交易/营收 < 40%', auto: false, desc: '关联交易占比过高 → F10查阅' },
+  { id: 10, label: '无存贷双高', auto: false, desc: '货币资金高且有息负债高 → F10查阅' },
+  { id: 11, label: '董监高减持 < 5%', auto: false, desc: '近一年累计减持比例 → F10查阅' },
+  { id: 12, label: '无重大诉讼/处罚', auto: false, desc: '近一年重大事项 → F10查阅' }
 ]
+
+export const REFRESH_INTERVAL = 10000
 
 export const FUNDAMENTAL_DEFAULTS = {
   roe: 12,
