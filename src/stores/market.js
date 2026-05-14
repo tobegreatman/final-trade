@@ -1,44 +1,17 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { loadJson, saveJson } from '../utils/storage.js'
 
-const NB_CACHE_KEY = 'northbound_cache'
-const MARGIN_CACHE_KEY = 'margin_cache'
-const LIMIT_CACHE_KEY = 'limitStats_cache'
-
-function loadCache(key) {
-  try {
-    const raw = localStorage.getItem(key)
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed) && parsed.length) return parsed
-    }
-  } catch { /* ignore */ }
-  return null
-}
-
-function loadCacheObj(key) {
-  try {
-    const raw = localStorage.getItem(key)
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      if (parsed && typeof parsed === 'object') return parsed
-    }
-  } catch { /* ignore */ }
-  return null
-}
-
-function saveCache(key, data) {
-  try {
-    localStorage.setItem(key, JSON.stringify(data))
-  } catch { /* ignore */ }
-}
+const NB_KEY = 'northbound_cache'
+const MARGIN_KEY = 'margin_cache'
+const LIMIT_KEY = 'limitStats_cache'
 
 export const useMarketStore = defineStore('market', () => {
   const indices = ref(null)
   const breadth = ref(null)
-  const northbound = ref(loadCache(NB_CACHE_KEY))
-  const margin = ref(loadCache(MARGIN_CACHE_KEY))
-  const limitStats = ref(loadCacheObj(LIMIT_CACHE_KEY))
+  const northbound = ref(loadJson(NB_KEY))
+  const margin = ref(loadJson(MARGIN_KEY))
+  const limitStats = ref(loadJson(LIMIT_KEY))
   const loading = ref(false)
 
   async function fetchIndices() {
@@ -67,8 +40,7 @@ export const useMarketStore = defineStore('market', () => {
       const json = await res.json()
       if (json.ok && Array.isArray(json.data) && json.data.length) {
         northbound.value = json.data
-        saveCache(NB_CACHE_KEY, json.data)
-        return
+        saveJson(NB_KEY, json.data)
       }
     } catch (e) {
       console.error('fetchNorthbound error:', e)
@@ -81,7 +53,7 @@ export const useMarketStore = defineStore('market', () => {
       const json = await res.json()
       if (json.ok && Array.isArray(json.data) && json.data.length) {
         margin.value = json.data
-        saveCache(MARGIN_CACHE_KEY, json.data)
+        saveJson(MARGIN_KEY, json.data)
       }
     } catch (e) {
       console.error('fetchMargin error:', e)
@@ -94,7 +66,7 @@ export const useMarketStore = defineStore('market', () => {
       const json = await res.json()
       if (json.ok && json.data) {
         limitStats.value = json.data
-        saveCache(LIMIT_CACHE_KEY, json.data)
+        saveJson(LIMIT_KEY, json.data)
       }
     } catch (e) {
       console.error('fetchLimitStats error:', e)

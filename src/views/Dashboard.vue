@@ -260,8 +260,8 @@ const checklist = reactive(PRE_TRADE_CHECKLIST.map(label => ({ label, checked: f
 const checkedCount = computed(() => checklist.filter(c => c.checked).length)
 
 const judgment = computed(() => {
-  if (!marketStore.indices || !marketStore.breadth || !marketStore.limitStats) return null
-  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.limitStats, marketStore.margin)
+  if (!marketStore.indices || !marketStore.breadth || !marketStore.northbound) return null
+  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound, marketStore.margin)
 })
 
 // ==================== Strategy Stock Screening ====================
@@ -427,6 +427,7 @@ function startIntradayTimer() {
 
 function startJudgmentTimer() {
   if (judgmentTimer) return
+  marketStore.fetchAll()
   judgmentTimer = setInterval(() => marketStore.fetchAll(), JUDGMENT_INTERVAL)
 }
 
@@ -465,7 +466,6 @@ async function fetchIndexIntraday() {
 }
 
 onMounted(async () => {
-  await marketStore.fetchAll()
   startIntradayTimer()
   startJudgmentTimer()
   document.addEventListener('visibilitychange', onVisibilityChange)
@@ -624,10 +624,6 @@ onBeforeUnmount(() => {
 
 .index-card__change.down {
   color: var(--green);
-}
-
-.change-arrow {
-  font-size: 10px;
 }
 
 .index-card__sparkline {

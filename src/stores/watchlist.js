@@ -1,24 +1,19 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { loadJson, saveJson } from '../utils/storage.js'
 import { REFRESH_INTERVAL } from '../utils/constants.js'
 
 const STORAGE_KEY = 'watchlist'
 
 export const useWatchlistStore = defineStore('watchlist', () => {
-  const stocks = ref(loadStocks())
+  const stocks = ref(loadJson(STORAGE_KEY, []))
   const quotes = ref({})
   const klineCache = ref({})
   let refreshTimer = null
   let visibilityHandler = null
 
-  function loadStocks() {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
-    } catch { return [] }
-  }
-
-  function saveStocks() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(stocks.value))
+  function save() {
+    saveJson(STORAGE_KEY, stocks.value)
   }
 
   const codes = computed(() => stocks.value.map(s => s.code))
@@ -26,18 +21,18 @@ export const useWatchlistStore = defineStore('watchlist', () => {
   function addStock(code, name) {
     if (stocks.value.find(s => s.code === code)) return
     stocks.value.push({ code, name, addedAt: Date.now() })
-    saveStocks()
+    save()
   }
 
   function removeStock(code) {
     stocks.value = stocks.value.filter(s => s.code !== code)
-    saveStocks()
+    save()
   }
 
   function reorderStock(fromIdx, toIdx) {
     const item = stocks.value.splice(fromIdx, 1)[0]
     stocks.value.splice(toIdx, 0, item)
-    saveStocks()
+    save()
   }
 
   async function fetchQuotes() {

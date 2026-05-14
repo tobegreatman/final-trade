@@ -1,12 +1,13 @@
 import { STRATEGY_PARAMS } from './constants.js'
 
+const ATR_PERIOD = 14
+const RISK_BUDGET = 0.02
+
 /**
- * 计算 ATR(14)
- * @param {Array} klines - K线数组，需有 high/low/close 字段，至少 15 根
- * @returns {number} ATR 值
+ * 计算 ATR
  */
 export function calcATR(klines) {
-  if (!klines || klines.length < 15) return 0
+  if (!klines || klines.length < ATR_PERIOD + 1) return 0
   const trList = []
   for (let i = 1; i < klines.length; i++) {
     const curr = klines[i]
@@ -18,44 +19,38 @@ export function calcATR(klines) {
     )
     trList.push(tr)
   }
-  // 取最后 14 个 TR 的均值
-  const last14 = trList.slice(-14)
-  return last14.reduce((a, b) => a + b, 0) / last14.length
+  const last = trList.slice(-ATR_PERIOD)
+  return last.reduce((a, b) => a + b, 0) / last.length
+}
+
+function getAdjustedAtrN(atr, price, baseN) {
+  if (!atr || !price) return baseN
+  const volatility = atr / price
+  if (volatility > 0.05) return baseN + 0.5
+  if (volatility < 0.015) return Math.max(baseN - 0.5, 0.5)
+  return baseN
 }
 
 /**
  * 计算止损价（含波动率自适应）
- * 高波动(ATR/price>5%): N+0.5 给更多空间，低波动(ATR/price<1.5%): N-0.5 收紧
  */
 export function calcStopLoss(buyPrice, atr, strategy) {
   const params = STRATEGY_PARAMS[strategy]
   if (!params) return buyPrice * 0.92
-  let n = params.atrN
-  const volatility = atr / buyPrice
-  if (volatility > 0.05) n += 0.5
-  else if (volatility < 0.015) n = Math.max(n - 0.5, 0.5)
-  const stop = buyPrice - n * atr
-  let result = Math.max(stop, 0.01)
-  if (strategy === 'bottom') {
-    result = Math.min(result, buyPrice * 0.92)
-  }
-  return result
+  const n = getAdjustedAtrN(atr, buyPrice, params.atrN)
+  const stop = Math.max(buyPrice - n * atr, 0.01)
+  return strategy === 'bottom' ? Math.min(stop, buyPrice * 0.92) : stop
 }
 
 /**
  * 计算仓位
- * @param {number} totalCapital - 总资金
- * @param {number} buyPrice - 买入价
- * @param {number} stopPrice - 止损价
- * @param {string} [strategy] - 策略 key，用于获取上限
- * @returns {{ amount: number, pct: number, shares: number }}
  */
 export function calcPosition(totalCapital, buyPrice, stopPrice, strategy) {
   if (!buyPrice || !stopPrice || buyPrice <= stopPrice) {
     return { amount: 0, pct: 0, shares: 0 }
   }
   const stopPct = (buyPrice - stopPrice) / buyPrice
-  const riskBudget = totalCapital * 0.02
+  const riskBudget = totalCapital * RISK_BUDGET
   const posByRisk = riskBudget / stopPct
   const params = strategy ? STRATEGY_PARAMS[strategy] : null
   const posLimit = params ? params.maxPosition : 0.25
@@ -68,10 +63,6 @@ export function calcPosition(totalCapital, buyPrice, stopPrice, strategy) {
 
 /**
  * 计算盈亏比
- * @param {number} buyPrice
- * @param {number} stopPrice
- * @param {number} targetPrice
- * @returns {number} 盈亏比
  */
 export function calcRiskReward(buyPrice, stopPrice, targetPrice) {
   if (!buyPrice || !stopPrice || !targetPrice) return 0
@@ -81,17 +72,8 @@ export function calcRiskReward(buyPrice, stopPrice, targetPrice) {
   return Math.round((reward / risk) * 100) / 100
 }
 
-function getAdjustedM(atr, buyPrice, trailAtrN) {
-  if (!atr) return trailAtrN
-  const volatility = atr / buyPrice
-  let m = trailAtrN
-  if (volatility > 0.05) m += 0.5
-  else if (volatility < 0.015) m = Math.max(m - 0.5, 0.5)
-  return m
-}
-
 /**
- * 计算初始跟踪止盈价（取止损价作为初始值，后续通过 updateTrailingStop 上移）
+ * 计算初始跟踪止盈价（取止损价作为初始值）
  */
 export function calcTrailingStop(buyPrice, atr, strategy) {
   return calcStopLoss(buyPrice, atr, strategy)
@@ -108,7 +90,7 @@ export function updateTrailingStop(currentTrailing, highestClose, atr, strategy)
     const newTrailing = highestClose * (1 - trailPct)
     return Math.max(currentTrailing, newTrailing)
   }
-  const m = getAdjustedM(atr, highestClose, params.trailAtrN)
+  const m = getAdjustedAtrN(atr, highestClose, params.trailAtrN)
   const newTrailing = highestClose - m * atr
   return Math.max(currentTrailing, newTrailing)
 }

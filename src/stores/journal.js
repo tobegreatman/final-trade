@@ -1,25 +1,29 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { loadJson, saveJson } from '../utils/storage.js'
 
 const TRADES_KEY = 'journal_trades'
 
+function generateId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+}
+
+function todayLocal() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 export const useJournalStore = defineStore('journal', () => {
-  const trades = ref(loadTrades())
+  const trades = ref(loadJson(TRADES_KEY, []))
 
-  function loadTrades() {
-    try {
-      return JSON.parse(localStorage.getItem(TRADES_KEY) || '[]')
-    } catch { return [] }
-  }
-
-  function saveTrades() {
-    localStorage.setItem(TRADES_KEY, JSON.stringify(trades.value))
+  function save() {
+    saveJson(TRADES_KEY, trades.value)
   }
 
   function addTrade(trade) {
     trades.value.push({
       ...trade,
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      id: generateId(),
       status: 'open',
       sellPrice: null,
       sellDate: null,
@@ -33,22 +37,24 @@ export const useJournalStore = defineStore('journal', () => {
       issues: [],
       reviewNotes: ''
     })
-    saveTrades()
+    save()
   }
 
   function closeTrade(id, closeData) {
-    const t = trades.value.find(t => t.id === id)
+    const t = trades.value.find(item => item.id === id)
     if (!t || t.status !== 'open') return
     const sellPrice = closeData.sellPrice
-    const pnl = (sellPrice - t.buyPrice) * t.quantity
-    const pnlPct = t.buyPrice > 0 ? ((sellPrice - t.buyPrice) / t.buyPrice) * 100 : 0
-    const risk = t.buyPrice - (t.stopPrice || 0)
-    const actualRR = risk > 0 ? ((sellPrice - t.buyPrice) / risk) : 0
+    const buyPrice = t.buyPrice || 0
+    const quantity = t.quantity || 0
+    const pnl = (sellPrice - buyPrice) * quantity
+    const pnlPct = buyPrice > 0 ? ((sellPrice - buyPrice) / buyPrice) * 100 : 0
+    const risk = buyPrice - (t.stopPrice || 0)
+    const actualRR = risk > 0 ? ((sellPrice - buyPrice) / risk) : 0
 
     Object.assign(t, {
       status: 'closed',
       sellPrice,
-      sellDate: closeData.sellDate || new Date().toISOString().slice(0, 10),
+      sellDate: closeData.sellDate || todayLocal(),
       sellReason: closeData.sellReason,
       pnl: Math.round(pnl * 100) / 100,
       pnlPct: Math.round(pnlPct * 100) / 100,
@@ -59,12 +65,12 @@ export const useJournalStore = defineStore('journal', () => {
       issues: closeData.issues || [],
       reviewNotes: closeData.reviewNotes || ''
     })
-    saveTrades()
+    save()
   }
 
   function deleteTrade(id) {
     trades.value = trades.value.filter(t => t.id !== id)
-    saveTrades()
+    save()
   }
 
   const openTrades = computed(() => trades.value.filter(t => t.status === 'open'))
@@ -77,29 +83,28 @@ export const useJournalStore = defineStore('journal', () => {
     }
     const wins = closed.filter(t => t.pnl > 0)
     const losses = closed.filter(t => t.pnl <= 0)
-    const totalWin = wins.reduce((s, t) => s + t.pnl, 0)
-    const totalLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0))
+    const totalWin = wins.reduce((s, t) => s + (t.pnl || 0), 0)
+    const totalLoss = Math.abs(losses.reduce((s, t) => s + (t.pnl || 0), 0))
     return {
       winRate: Math.round((wins.length / closed.length) * 100),
       profitFactor: totalLoss > 0 ? Math.round((totalWin / totalLoss) * 100) / 100 : 0,
-      totalPnl: Math.round(closed.reduce((s, t) => s + t.pnl, 0) * 100) / 100,
-      avgWin: wins.length ? Math.round(wins.reduce((s, t) => s + t.pnlPct, 0) / wins.length * 100) / 100 : 0,
-      avgLoss: losses.length ? Math.round(losses.reduce((s, t) => s + t.pnlPct, 0) / losses.length * 100) / 100 : 0,
+      totalPnl: Math.round(closed.reduce((s, t) => s + (t.pnl || 0), 0) * 100) / 100,
+      avgWin: wins.length ? Math.round(wins.reduce((s, t) => s + (t.pnlPct || 0), 0) / wins.length * 100) / 100 : 0,
+      avgLoss: losses.length ? Math.round(losses.reduce((s, t) => s + (t.pnlPct || 0), 0) / losses.length * 100) / 100 : 0,
       count: closed.length
     }
   })
 
-  // 连续止损检测
   const consecutiveStops = computed(() => {
+    const sorted = [...closedTrades.value].sort((a, b) => (b.sellDate || '').localeCompare(a.sellDate || ''))
     let count = 0
-    for (let i = closedTrades.value.length - 1; i >= 0; i--) {
-      if (closedTrades.value[i].pnl < 0) count++
+    for (const t of sorted) {
+      if (t.pnl < 0) count++
       else break
     }
     return count
   })
 
-  // 月度统计
   const monthlyStats = computed(() => {
     const map = {}
     for (const t of closedTrades.value) {
@@ -109,10 +114,11 @@ export const useJournalStore = defineStore('journal', () => {
       map[month].count++
       if (t.pnl > 0) map[month].wins++
     }
-    return Object.values(map).sort((a, b) => a.month.localeCompare(b.month))
+    return Object.values(map)
+      .map(s => ({ ...s, pnl: Math.round(s.pnl * 100) / 100 }))
+      .sort((a, b) => a.month.localeCompare(b.month))
   })
 
-  // 策略对比
   const strategyStats = computed(() => {
     const map = {}
     for (const t of closedTrades.value) {

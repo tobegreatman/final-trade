@@ -188,7 +188,6 @@ const basicCache = ref({})
 const periods = [
   { key: '1d', label: '1日' },
   { key: '1w', label: '1周' },
-  { key: '1m', label: '1月' },
   { key: '3m', label: '3月' },
   { key: '1y', label: '1年' },
   { key: '5y', label: '5年' },
@@ -200,14 +199,13 @@ const chartData = computed(() => {
   const p = activePeriod.value
   if (p === '1d') return intradayCache.value[selectedCode.value]?.trends || []
   if (p === '1w') return intraday5dCache.value[selectedCode.value]?.trends || []
-  if (p === '1m') return (klineCache.value[selectedCode.value]?.klines || []).slice(-22)
   if (p === '3m') return (klineCache.value[selectedCode.value]?.klines || []).slice(-60)
   if (p === '1y') return (kline5yCache.value[selectedCode.value]?.klines || []).slice(-250)
   if (p === '5y' || p === 'all') return kline5yCache.value[selectedCode.value]?.klines || []
   return []
 })
 
-const isKlineMode = computed(() => ['1m', '3m', '1y', '5y', 'all'].includes(activePeriod.value))
+const isKlineMode = computed(() => ['3m', '1y', '5y', 'all'].includes(activePeriod.value))
 
 const chartPositive = computed(() => isQuoteUp(selectedCode.value))
 const chartTotalSlots = computed(() => (activePeriod.value === '1d' || activePeriod.value === '1w') ? 240 : 0)

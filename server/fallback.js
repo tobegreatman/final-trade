@@ -170,11 +170,6 @@ export async function fetchIndicesIntradayFallback() {
   return result
 }
 
-// 涨跌家数 — 腾讯无直接替代 API，抛错让调用方使用缓存
-export async function fetchBreadthFallback() {
-  throw new Error('No breadth fallback')
-}
-
 // 个股 120 日 K 线
 export async function fetchStockKlineFallback(code) {
   const tc = toTc(code)

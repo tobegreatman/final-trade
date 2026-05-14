@@ -29,7 +29,7 @@ final-trade/
 ├── vite.config.js              # Vite 配置，/api 代理到 localhost:3001
 ├── server/
 │   ├── package.json            # 后端依赖
-│   ├── index.js                # Koa API 代理（17 条路由）
+│   ├── index.js                # Koa API 代理（16 条路由）
 │   └── fallback.js             # 腾讯/新浪备用数据源
 ├── src/
 │   ├── main.js
@@ -43,6 +43,7 @@ final-trade/
 │   ├── utils/
 │   │   ├── marketJudge.js      # 六维大盘判定算法
 │   │   ├── position.js         # ATR 仓位/止损/盈亏比计算
+│   │   ├── storage.js          # localStorage 统一读写工具
 │   │   └── constants.js        # 交易规则常量 + 全局刷新间隔
 │   ├── components/
 │   │   ├── NavBar.vue          # 顶部导航
@@ -105,9 +106,9 @@ cd server && node index.js   # 启动后端，配合静态文件服务使用
 |------|------|------|
 | GET | `/api/health` | 健康检查 |
 | GET | `/api/market/indices` | 三大指数 + MA20/60/120 |
-| GET | `/api/market/breadth` | 沪深涨跌家数 |
+| GET | `/api/market/breadth` | 沪深京A股涨跌家数（push2 → 新浪二级回退） |
 | GET | `/api/market/indices/intraday` | 三大指数分时数据 |
-| GET | `/api/market/northbound` | 近 5 日北向资金 |
+| GET | `/api/market/northbound` | 近 20 日北向资金成交额 |
 | GET | `/api/market/margin` | 融资融券余额 |
 | GET | `/api/market/limit-stats` | 涨跌停统计 |
 | GET | `/api/stock/:code/kline` | 个股日 K 线（120 日） |
@@ -126,12 +127,12 @@ cd server && node index.js   # 启动后端，配合静态文件服务使用
 
 从 6 个维度自动判断市场状态（牛市/偏多/震荡/偏空/熊市）：
 
-1. **均线系统** — MA20/60/120 多空排列
-2. **价格 vs MA60** — 站上/跌破
-3. **创新高/低** — 近 20 日新高新低家数比
-4. **涨跌家数** — 沪深涨跌比
-5. **成交量趋势** — 5 日均量 vs 20 日均量
-6. **北向资金** — 近 5 日净流入天数
+1. **MACD** — DIF/DEA 金叉死叉、零轴位置、柱状图变化
+2. **涨跌家数** — 沪深京A股涨跌比
+3. **RSI** — RSI(14) 超买超卖与趋势方向
+4. **融资余额** — 5 日净变化率
+5. **量价配合** — 量价齐升/背离/缩量
+6. **北向资金** — 近 5 日均量 vs 20 日均量活跃度
 
 ≥ 3 个信号方向一致则确认状态，状态映射到建议仓位和推荐策略。
 
@@ -169,7 +170,8 @@ cd server && node index.js   # 启动后端，配合静态文件服务使用
 
 - 9:00 前使用前一交易日日期参数查询（获取最新收盘数据）
 - 9:00 后使用当前日期参数查询（获取盘中实时数据）
-- 东方财富 API 失败时自动切换腾讯/新浪备用数据源（`server/fallback.js`）
+- 东方财富 push2 系列域名不稳定时自动回退：涨跌家数走新浪批量查询，个股数据走腾讯备用
+- 北向资金使用 datacenter-web RPT_MUTUAL_DEALAMT 报表，不依赖 push2 域名
 - 选股优先使用 xuangu API（`POST /api/stock/xuangu`），不可用时回退本地筛选（`GET /api/stock/screen`）
 
 ## 配色说明

@@ -7,9 +7,25 @@ import { MARKET_STATUS } from './constants.js'
  * 维度 3: RSI 状态（超买超卖）
  * 维度 4: 融资余额（杠杆资金趋势）
  * 维度 5: 量价配合（资金确认）
- * 维度 6: 涨跌停统计（市场情绪）
+ * 维度 6: 北向资金（外资动向）
  */
-export function judgeMarket(indices, breadth, limitStats, margin) {
+
+// ==================== 共享格式化 ====================
+function fmtAmt(v) {
+  if (v >= 1e12) return (v / 1e12).toFixed(2) + '万亿'
+  if (v >= 1e8) return (v / 1e8).toFixed(0) + '亿'
+  if (v >= 1e4) return (v / 1e4).toFixed(0) + '万'
+  return v.toFixed(0)
+}
+
+function fmtAmtWan(v) {
+  // v 的单位是万元
+  if (v >= 10000) return (v / 10000).toFixed(0) + '亿'
+  return v.toFixed(0) + '万'
+}
+
+// ==================== 主判定函数 ====================
+export function judgeMarket(indices, breadth, northbound, margin) {
   const idx = indices.sh || {}
   const klines = idx.klines || []
   const ma = idx.ma || {}
@@ -19,41 +35,18 @@ export function judgeMarket(indices, breadth, limitStats, margin) {
   let bullCount = 0
   let bearCount = 0
 
-  // 维度 1: MACD 状态
-  const macdSignal = judgeMACD(klines)
-  signals.push(macdSignal)
-  if (macdSignal.bull) bullCount++
-  if (macdSignal.bear) bearCount++
+  const addSignal = (sig) => {
+    signals.push(sig)
+    if (sig.bull) bullCount++
+    if (sig.bear) bearCount++
+  }
 
-  // 维度 2: 涨跌家数
-  const breadthSignal = judgeBreadth(breadth)
-  signals.push(breadthSignal)
-  if (breadthSignal.bull) bullCount++
-  if (breadthSignal.bear) bearCount++
-
-  // 维度 3: RSI 状态
-  const rsiSignal = judgeRSI(klines)
-  signals.push(rsiSignal)
-  if (rsiSignal.bull) bullCount++
-  if (rsiSignal.bear) bearCount++
-
-  // 维度 4: 融资余额趋势
-  const marginSignal = judgeMarginBalance(margin)
-  signals.push(marginSignal)
-  if (marginSignal.bull) bullCount++
-  if (marginSignal.bear) bearCount++
-
-  // 维度 5: 量价配合
-  const vpSignal = judgeVolumePrice(klines)
-  signals.push(vpSignal)
-  if (vpSignal.bull) bullCount++
-  if (vpSignal.bear) bearCount++
-
-  // 维度 6: 涨跌停统计
-  const ltSignal = judgeLimitStats(limitStats)
-  signals.push(ltSignal)
-  if (ltSignal.bull) bullCount++
-  if (ltSignal.bear) bearCount++
+  addSignal(judgeMACD(klines))
+  addSignal(judgeBreadth(breadth))
+  addSignal(judgeRSI(klines))
+  addSignal(judgeMarginBalance(margin))
+  addSignal(judgeVolumePrice(klines))
+  addSignal(judgeNorthbound(northbound))
 
   const status = determineStatus(bullCount, bearCount)
   const confirmed = bullCount >= 3 || bearCount >= 3
@@ -116,19 +109,15 @@ function judgeMACD(klines) {
   if (!macd) return { dimension: 'MACD', value: '数据不足', bull: false, bear: false, desc: '' }
   const { dif, dea, hist, prevHist, difAboveZero, goldenCross } = macd
 
-  // 金叉 + 零轴上方 + 柱状图放大 = 强牛
   if (goldenCross && difAboveZero && hist > 0 && hist > prevHist) {
     return { dimension: 'MACD', value: '多头强势', bull: true, bear: false, desc: `DIF=${dif.toFixed(0)}>DEA=${dea.toFixed(0)}，零轴上方，柱状图放大` }
   }
-  // 金叉 + 柱状图转正 = 牛
   if (goldenCross && hist > 0) {
     return { dimension: 'MACD', value: '金叉确认', bull: true, bear: false, desc: `DIF=${dif.toFixed(0)}上穿DEA=${dea.toFixed(0)}，柱状图转正` }
   }
-  // 死叉 + 零轴下方 + 柱状图放大 = 强熊
   if (!goldenCross && !difAboveZero && hist < 0 && hist < prevHist) {
     return { dimension: 'MACD', value: '空头强势', bull: false, bear: true, desc: `DIF=${dif.toFixed(0)}<DEA=${dea.toFixed(0)}，零轴下方，柱状图放大` }
   }
-  // 死叉 + 柱状图转负 = 熊
   if (!goldenCross && hist < 0) {
     return { dimension: 'MACD', value: '死叉确认', bull: false, bear: true, desc: `DIF=${dif.toFixed(0)}下穿DEA=${dea.toFixed(0)}，柱状图转负` }
   }
@@ -165,20 +154,16 @@ function judgeRSI(klines) {
   const rsi5 = rsis.slice(-5)
   const trendingUp = rsi5[rsi5.length - 1] > rsi5[0]
 
-  // RSI > 60 且上行 = 强势
   if (current > 60 && trendingUp) {
     return { dimension: 'RSI', value: `强势 ${current.toFixed(0)}`, bull: true, bear: false, desc: `RSI(14)=${current.toFixed(1)}，持续上行，多头动量充足` }
   }
-  // RSI 从超卖区回升（前5日内曾<30，现在>40）
   const hadOversold = rsi5.some(r => r < 30)
   if (hadOversold && current > 40 && current > prev) {
     return { dimension: 'RSI', value: `超卖回升 ${current.toFixed(0)}`, bull: true, bear: false, desc: `RSI从超卖区回升至${current.toFixed(1)}，反弹信号` }
   }
-  // RSI < 40 且下行 = 弱势
   if (current < 40 && !trendingUp) {
     return { dimension: 'RSI', value: `弱势 ${current.toFixed(0)}`, bull: false, bear: true, desc: `RSI(14)=${current.toFixed(1)}，持续下行，空头动量主导` }
   }
-  // RSI 从超买区回落（前5日内曾>70，现在<60）
   const hadOverbought = rsi5.some(r => r > 70)
   if (hadOverbought && current < 60 && current < prev) {
     return { dimension: 'RSI', value: `超买回落 ${current.toFixed(0)}`, bull: false, bear: true, desc: `RSI从超买区回落至${current.toFixed(1)}，调整信号` }
@@ -195,49 +180,34 @@ function judgeVolumePrice(klines) {
   const priceUp = last.close > prev.close
   const priceDown = last.close < prev.close
 
-  // 近5日均量
   const vol5 = klines.slice(-5).reduce((a, k) => a + k.volume, 0) / 5
   const volUp = last.volume > vol5 * 1.2
   const volDown = last.volume < vol5 * 0.7
 
-  // 检测近3日的量价背离
   let divergence = false
   if (klines.length >= 5) {
     const recent = klines.slice(-5)
     const pricesUp = recent[4].close > recent[0].close
-    const avgVol = recent.reduce((a, k) => a + k.volume, 0) / 5
     const earlyVol = recent.slice(0, 2).reduce((a, k) => a + k.volume, 0) / 2
     const lateVol = recent.slice(3).reduce((a, k) => a + k.volume, 0) / 2
-    // 顶背离：价格上涨但成交量递减
     if (pricesUp && lateVol < earlyVol * 0.7) divergence = 'top'
-    // 底背离：价格下跌但成交量放大
     if (!pricesUp && lateVol > earlyVol * 1.3) divergence = 'bottom'
   }
 
-  const fmtVol = (v) => {
-    if (v >= 1e8) return (v / 1e8).toFixed(0) + '亿'
-    return (v / 1e4).toFixed(0) + '万'
-  }
-
-  // 价涨量增 = 健康
   if (priceUp && volUp) {
-    return { dimension: '量价配合', value: '价涨量增', bull: true, bear: false, desc: `量价齐升，成交${fmtVol(last.volume)}较均量放大` }
+    return { dimension: '量价配合', value: '价涨量增', bull: true, bear: false, desc: `量价齐升，成交${fmtAmt(last.volume)}较均量放大` }
   }
-  // 底背离 = 看多
   if (divergence === 'bottom') {
     return { dimension: '量价配合', value: '底部放量', bull: true, bear: false, desc: '价格下跌但量能放大，资金逢低介入' }
   }
-  // 顶背离 = 看空
   if (divergence === 'top') {
     return { dimension: '量价配合', value: '顶背离', bull: false, bear: true, desc: '价格上涨但量能萎缩，量价背离需警惕' }
   }
-  // 价涨量缩 = 警惕
   if (priceUp && volDown) {
     return { dimension: '量价配合', value: '缩量上涨', bull: false, bear: true, desc: '价格上涨但量能不足，上涨持续性存疑' }
   }
-  // 价跌量增 = 出货
   if (priceDown && volUp) {
-    return { dimension: '量价配合', value: '放量下跌', bull: false, bear: true, desc: `价跌量增，成交${fmtVol(last.volume)}较均量放大，抛压较重` }
+    return { dimension: '量价配合', value: '放量下跌', bull: false, bear: true, desc: `价跌量增，成交${fmtAmt(last.volume)}较均量放大，抛压较重` }
   }
   return { dimension: '量价配合', value: '量价正常', bull: false, bear: false, desc: '量价关系无明显异常' }
 }
@@ -265,47 +235,35 @@ function judgeMarginBalance(margin) {
   }
   const latest = margin[0].rzBalance
   const day5 = margin[Math.min(4, margin.length - 1)].rzBalance
-  const fmt = (v) => {
-    if (v >= 1e12) return (v / 1e12).toFixed(2) + '万亿'
-    if (v >= 1e8) return (v / 1e8).toFixed(0) + '亿'
-    return (v / 1e4).toFixed(0) + '万'
-  }
   const change5d = latest - day5
   const changePct = day5 > 0 ? (change5d / day5 * 100) : 0
   if (change5d > 0 && changePct > 0.5) {
-    return { dimension: '融资余额', value: `持续流入 ${fmt(latest)}`, bull: true, bear: false, desc: `5日净增${fmt(Math.abs(change5d))}，增幅${changePct.toFixed(2)}%` }
+    return { dimension: '融资余额', value: `持续流入 ${fmtAmt(latest)}`, bull: true, bear: false, desc: `5日净增${fmtAmt(Math.abs(change5d))}，增幅${changePct.toFixed(2)}%` }
   }
   if (change5d < 0 && changePct < -0.5) {
-    return { dimension: '融资余额', value: `持续流出 ${fmt(latest)}`, bull: false, bear: true, desc: `5日净减${fmt(Math.abs(change5d))}，降幅${Math.abs(changePct).toFixed(2)}%` }
+    return { dimension: '融资余额', value: `持续流出 ${fmtAmt(latest)}`, bull: false, bear: true, desc: `5日净减${fmtAmt(Math.abs(change5d))}，降幅${Math.abs(changePct).toFixed(2)}%` }
   }
-  return { dimension: '融资余额', value: `${fmt(latest)}`, bull: false, bear: false, desc: `5日变动${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}%，无明显趋势` }
+  return { dimension: '融资余额', value: `${fmtAmt(latest)}`, bull: false, bear: false, desc: `5日变动${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}%，无明显趋势` }
 }
 
-// ==================== 涨跌停统计 ====================
-function judgeLimitStats(limitStats) {
-  if (!limitStats || !limitStats.limitUp) {
-    return { dimension: '涨跌停', value: '数据不足', bull: false, bear: false, desc: '' }
+// ==================== 北向资金 ====================
+function judgeNorthbound(northbound) {
+  if (!northbound || northbound.length < 5) {
+    return { dimension: '北向资金', value: '数据不足', bull: false, bear: false, desc: '' }
   }
-  const { limitUp, limitDown, sealingRate, moneyEffect } = limitStats
-  const ratio = limitDown > 0 ? limitUp / limitDown : limitUp
+  const amt5 = northbound.slice(0, 5).reduce((a, d) => a + (d.nfAmt || 0), 0) / 5
+  const amt20 = northbound.slice(0, Math.min(20, northbound.length)).reduce((a, d) => a + (d.nfAmt || 0), 0) / Math.min(20, northbound.length)
+  const ratio = amt20 > 0 ? amt5 / amt20 : 1
+  const changePct = (ratio - 1) * 100
+  const latest = northbound[0]?.nfAmt || 0
 
-  // 涨停>100 + 封板率>70% + 赚钱效应>70 = 强势做多
-  if (limitUp > 100 && sealingRate > 70 && moneyEffect > 70) {
-    return { dimension: '涨跌停', value: `强势 ${limitUp}/${limitDown}家`, bull: true, bear: false, desc: `涨停${limitUp}家，封板率${sealingRate}%，赚钱效应${moneyEffect}%` }
+  if (ratio > 1.1) {
+    return { dimension: '北向资金', value: `活跃 ${fmtAmtWan(latest)}`, bull: true, bear: false, desc: `近5日均量${fmtAmtWan(amt5)}，高于20日均量${fmtAmtWan(amt20)}，增幅${changePct.toFixed(1)}%` }
   }
-  // 涨停>50 + 跌停<10 = 偏多
-  if (limitUp > 50 && limitDown < 10) {
-    return { dimension: '涨跌停', value: `偏多 ${limitUp}/${limitDown}家`, bull: true, bear: false, desc: `涨停${limitUp}家/跌停${limitDown}家，比值${ratio.toFixed(1)}` }
+  if (ratio < 0.9) {
+    return { dimension: '北向资金', value: `退缩 ${fmtAmtWan(latest)}`, bull: false, bear: true, desc: `近5日均量${fmtAmtWan(amt5)}，低于20日均量${fmtAmtWan(amt20)}，降幅${Math.abs(changePct).toFixed(1)}%` }
   }
-  // 跌停>20 + 涨停<20 = 偏空
-  if (limitDown > 20 && limitUp < 20) {
-    return { dimension: '涨跌停', value: `偏空 ${limitUp}/${limitDown}家`, bull: false, bear: true, desc: `跌停${limitDown}家/涨停${limitUp}家，市场恐慌情绪升温` }
-  }
-  // 跌停>50 + 封板率<30% = 极度恐慌
-  if (limitDown > 50 && sealingRate < 30) {
-    return { dimension: '涨跌停', value: `恐慌 ${limitUp}/${limitDown}家`, bull: false, bear: true, desc: `跌停${limitDown}家，封板率仅${sealingRate}%，市场极度恐慌` }
-  }
-  return { dimension: '涨跌停', value: `${limitUp}/${limitDown}家`, bull: false, bear: false, desc: `涨停${limitUp}家/跌停${limitDown}家，封板率${sealingRate}%` }
+  return { dimension: '北向资金', value: `${fmtAmtWan(latest)}`, bull: false, bear: false, desc: `近5日均量${fmtAmtWan(amt5)}，20日均量${fmtAmtWan(amt20)}，偏差${changePct >= 0 ? '+' : ''}${changePct.toFixed(1)}%` }
 }
 
 // ==================== 综合判定 ====================
