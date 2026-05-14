@@ -276,12 +276,12 @@ const buyDecisionTree = [
 ]
 
 const marketDimensions = [
-  { name: '均线系统', source: 'MA20/60/120 多空排列', bull: '多头排列', bear: '空头排列' },
-  { name: '价格 vs MA60', source: '指数收盘价与 MA60 关系', bull: '站上 MA60 且 MA60 拐头向上', bear: '跌破 MA60 且 MA60 拐头向下' },
-  { name: '创新高/低', source: '近 20 日新高新低家数', bull: '新高/新低 > 2', bear: '新低/新高 > 2' },
+  { name: 'MACD', source: '上证指数 MACD(12,26,9)', bull: '金叉+零轴上方+柱状图放大', bear: '死叉+零轴下方+柱状图放大' },
   { name: '涨跌家数', source: '沪深两市实时涨跌统计', bull: '上涨/下跌 > 2', bear: '下跌/上涨 > 2' },
-  { name: '成交额', source: '两市近5日均额 vs 20日均额', bull: '持续放大', bear: '持续萎缩' },
-  { name: '北向资金', source: '近 5 日净流入', bull: '连续5日净流入', bear: '连续5日净流出' }
+  { name: 'RSI', source: '上证指数 RSI(14)', bull: 'RSI>60且上行 或 超卖回升', bear: 'RSI<40且下行 或 超买回落' },
+  { name: '融资余额', source: '近10日融资余额趋势', bull: '5日净增>0.5%', bear: '5日净减>0.5%' },
+  { name: '量价配合', source: '上证指数近5日量价关系', bull: '价涨量增/底部放量', bear: '缩量上涨/放量下跌/顶背离' },
+  { name: '涨跌停', source: '当日涨跌停家数+封板率', bull: '涨停>100+封板率>70%', bear: '跌停>20+涨停<20' }
 ]
 
 const marketStatusTable = [

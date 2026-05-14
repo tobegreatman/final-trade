@@ -120,11 +120,10 @@
               :height="280"
               :auto-width="true"
             />
-            <Sparkline
+            <IntradayChart
               v-else-if="chartData.length"
               :data="chartData"
               :positive="chartPositive"
-              :show-area="true"
               :height="280"
               :auto-width="true"
               :ref-price="chartRefPrice"
@@ -163,6 +162,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useWatchlistStore } from '../stores/watchlist.js'
 import { REFRESH_INTERVAL } from '../utils/constants.js'
 import Sparkline from '../components/Sparkline.vue'
+import IntradayChart from '../components/IntradayChart.vue'
 import KlineChart from '../components/KlineChart.vue'
 
 const watchlistStore = useWatchlistStore()
@@ -210,9 +210,10 @@ const chartData = computed(() => {
 const isKlineMode = computed(() => ['1m', '3m', '1y', '5y', 'all'].includes(activePeriod.value))
 
 const chartPositive = computed(() => isQuoteUp(selectedCode.value))
-const chartTotalSlots = computed(() => activePeriod.value === '1d' ? 240 : 0)
+const chartTotalSlots = computed(() => (activePeriod.value === '1d' || activePeriod.value === '1w') ? 240 : 0)
 const chartRefPrice = computed(() => {
   if (activePeriod.value === '1d') return intradayCache.value[selectedCode.value]?.preClose || null
+  if (activePeriod.value === '1w') return intraday5dCache.value[selectedCode.value]?.preClose || null
   return null
 })
 
@@ -485,6 +486,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 12px;
+  contain: layout style;
 }
 
 .idx-header {
@@ -527,6 +529,7 @@ onBeforeUnmount(() => {
 .idx-chart {
   border-top: 1px solid var(--border);
   padding-top: 8px;
+  min-height: 78px;
 }
 
 /* ===== SPLIT LAYOUT ===== */

@@ -16,8 +16,8 @@
 ## 技术栈
 
 - **前端**: Vue 3.5 + Vite 6 + Vue Router 4 + Pinia 2 (Composition API)
-- **后端**: Koa 2 + @koa/router (纯 API 代理层，无数据库)
-- **数据源**: 东方财富公开 API（通过后端代理避免 CORS）
+- **后端**: Koa 2 + @koa/router + koa-bodyparser (纯 API 代理层，无数据库)
+- **数据源**: 东方财富公开 API（主用）+ 腾讯/新浪备用（通过后端代理避免 CORS）
 - **持久化**: localStorage（所有用户数据本地存储）
 
 ## 项目结构
@@ -29,7 +29,8 @@ final-trade/
 ├── vite.config.js              # Vite 配置，/api 代理到 localhost:3001
 ├── server/
 │   ├── package.json            # 后端依赖
-│   └── index.js                # Koa API 代理（15 条路由）
+│   ├── index.js                # Koa API 代理（17 条路由）
+│   └── fallback.js             # 腾讯/新浪备用数据源
 ├── src/
 │   ├── main.js
 │   ├── App.vue
@@ -46,6 +47,7 @@ final-trade/
 │   ├── components/
 │   │   ├── NavBar.vue          # 顶部导航
 │   │   ├── Sparkline.vue       # Canvas 迷你走势图
+│   │   ├── IntradayChart.vue   # Canvas 分时图（价格线 + 成交量）
 │   │   └── KlineChart.vue      # K 线图组件
 │   ├── views/
 │   │   ├── Dashboard.vue       # 大盘状态 + 策略选股建议
@@ -115,7 +117,8 @@ cd server && node index.js   # 启动后端，配合静态文件服务使用
 | GET | `/api/stock/:code/basic` | 个股基本面（PE/PB/市值/ROE） |
 | GET | `/api/stock/batch/quotes` | 批量实时行情 |
 | GET | `/api/stock/search` | 搜索股票（代码/名称/拼音） |
-| GET | `/api/stock/screen` | 策略选股（趋势突破/回调买入） |
+| GET | `/api/stock/screen` | 策略选股 — 备用（趋势突破/回调买入） |
+| POST | `/api/stock/xuangu` | 一句话选股 — 主用（自然语言条件，调用东方财富 xuangu API） |
 
 ## 核心功能
 
@@ -134,15 +137,15 @@ cd server && node index.js   # 启动后端，配合静态文件服务使用
 
 ### 策略选股建议
 
-根据六维判据结果自动匹配策略并生成选股条件：
+根据六维判据结果自动匹配策略，生成自然语言选股条件，通过东方财富 xuangu API 实时查询：
 
-| 市场状态 | 推荐策略 | 选股逻辑 |
+| 市场状态 | 推荐策略 | 选股条件 |
 |---------|---------|---------|
-| 牛市 | 趋势突破 | 主力净流入排序，ROE>12%，流通市值>30亿 |
-| 偏多/震荡 | 回调买入 | 市值排序，ROE>12%，PE 5-40，换手适中 |
+| 牛市 | 趋势突破 | ROE>12%，营收/净利润增速>10%，MACD金叉，均线多头排列 |
+| 偏多/震荡 | 回调买入 | ROE>12%，PE 5-40，资产负债率<60%，股价接近20日均线，缩量回调 |
 | 偏空/熊市 | 空仓观望 | 不生成选股建议 |
 
-选股结果同步生成东方财富「一句话选股」提示词，可直接复制使用。
+系统自动生成一句话选股条件并实时查询，用户可编辑条件自定义选股。支持基本面（ROE、PE、市值）和技术面（MACD金叉、均线、换手率）等条件。
 
 ### ATR 动态仓位计算
 
@@ -166,6 +169,8 @@ cd server && node index.js   # 启动后端，配合静态文件服务使用
 
 - 9:00 前使用前一交易日日期参数查询（获取最新收盘数据）
 - 9:00 后使用当前日期参数查询（获取盘中实时数据）
+- 东方财富 API 失败时自动切换腾讯/新浪备用数据源（`server/fallback.js`）
+- 选股优先使用 xuangu API（`POST /api/stock/xuangu`），不可用时回退本地筛选（`GET /api/stock/screen`）
 
 ## 配色说明
 

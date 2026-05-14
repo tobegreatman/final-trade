@@ -91,15 +91,10 @@ function getAdjustedM(atr, buyPrice, trailAtrN) {
 }
 
 /**
- * 计算初始跟踪止盈价（ATR 动态回撤）
+ * 计算初始跟踪止盈价（取止损价作为初始值，后续通过 updateTrailingStop 上移）
  */
 export function calcTrailingStop(buyPrice, atr, strategy) {
-  const params = STRATEGY_PARAMS[strategy]
-  if (!params) return buyPrice * 0.92
-  if (!atr) return buyPrice * (1 - params.trailAtrN * 0.03)
-  const m = getAdjustedM(atr, buyPrice, params.trailAtrN)
-  const trail = buyPrice - m * atr
-  return Math.max(trail, 0.01)
+  return calcStopLoss(buyPrice, atr, strategy)
 }
 
 /**

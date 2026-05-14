@@ -87,11 +87,13 @@
 
         <!-- RIGHT: 6-Dimension Signal Table -->
         <div class="signals-panel">
-          <h2 class="panel-title">六维判据</h2>
+          <h2 class="panel-title">六维判据
+            <button class="btn btn-sm btn-ghost refresh-btn" @click="refreshJudgment">刷新</button>
+          </h2>
           <div class="signals-grid">
             <div
               v-for="(sig, i) in judgment?.signals || []"
-              :key="i"
+              :key="sig.dimension"
               class="signal-card"
               :class="{ 'signal-enter': showSignals }"
               :style="{ animationDelay: `${i * 80}ms` }"
@@ -150,11 +152,19 @@
           <!-- Prompt -->
           <div class="prompt-block">
             <div class="prompt-header">
-              <span class="prompt-label">一句话选股提示词</span>
-              <button class="btn btn-sm btn-ghost" @click="copyText(screenerPrompt)">复制</button>
+              <span class="prompt-label">一句话选股</span>
+              <div class="prompt-actions">
+                <button v-if="isCustomPrompt" class="btn btn-sm btn-ghost" @click="resetPrompt">恢复默认</button>
+                <button v-if="!editingPrompt" class="btn btn-sm btn-ghost" @click="startEditPrompt">编辑条件</button>
+                <button v-else class="btn btn-sm btn-ghost primary" @click="applyCustomPrompt">查询</button>
+                <button class="btn btn-sm btn-ghost" @click="copyText(activePrompt)">复制</button>
+              </div>
             </div>
-            <pre class="prompt-code">{{ screenerPrompt }}</pre>
-            <p class="prompt-hint">粘贴到东方财富 App「一句话选股」或 xuangu.eastmoney.com</p>
+            <pre v-if="!editingPrompt" class="prompt-code">{{ activePrompt }}</pre>
+            <textarea v-else v-model="editPromptText" class="prompt-edit" rows="3" @keydown.enter.prevent="applyCustomPrompt"></textarea>
+            <p class="prompt-hint" v-if="!editingPrompt">
+              匹配 {{ screenStocks.length }} 只 · 点击「编辑条件」自定义选股条件
+            </p>
           </div>
 
           <!-- Stock cards -->
@@ -171,7 +181,7 @@
               >
                 <div class="stock-card__header">
                   <span class="stock-card__name">{{ s.name }}</span>
-                  <span class="stock-card__industry">{{ s.industry }}</span>
+                  <span class="stock-card__industry">{{ s.industry || fmtCap(s.marketCap) }}</span>
                 </div>
                 <div class="stock-card__price">
                   <span class="stock-card__val">{{ s.price?.toFixed(2) }}</span>
@@ -184,16 +194,24 @@
                   <span>PB {{ s.pb?.toFixed(2) }}</span>
                   <span>换手 {{ s.turnover?.toFixed(1) }}%</span>
                 </div>
-                <div class="stock-card__flow">
+                <div class="stock-card__flow" v-if="s.mainFlow != null">
                   <span class="flow-label">主力</span>
                   <span :class="s.mainFlow >= 0 ? 'up' : 'down'">
                     {{ fmtFlow(s.mainFlow) }}
                   </span>
                 </div>
+                <div class="stock-card__flow" v-else>
+                  <span class="flow-label">成交</span>
+                  <span>{{ s.volume || '--' }}</span>
+                </div>
               </div>
             </div>
             <button class="btn btn-sm btn-ghost screen-refresh" @click="fetchScreenStocks">刷新候选</button>
           </template>
+          <div v-else class="screen-empty">
+            <span class="screen-empty__text">暂无匹配结果</span>
+            <button class="btn btn-sm btn-ghost screen-refresh" @click="fetchScreenStocks">重新检测</button>
+          </div>
         </template>
       </section>
 
@@ -242,8 +260,8 @@ const checklist = reactive(PRE_TRADE_CHECKLIST.map(label => ({ label, checked: f
 const checkedCount = computed(() => checklist.filter(c => c.checked).length)
 
 const judgment = computed(() => {
-  if (!marketStore.indices || !marketStore.breadth || !marketStore.northbound) return null
-  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound, marketStore.margin)
+  if (!marketStore.indices || !marketStore.breadth || !marketStore.limitStats) return null
+  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.limitStats, marketStore.margin)
 })
 
 // ==================== Strategy Stock Screening ====================
@@ -273,11 +291,39 @@ const screenerPrompt = computed(() => {
   return `${base}，ROE大于12%，市盈率5到30，资产负债率小于60%，经营现金流为正，流通市值大于50亿，股价接近20日均线偏离不超过2%，5日均量小于20日均量的70%`
 })
 
+const customPrompt = ref('')
+const editingPrompt = ref(false)
+const editPromptText = ref('')
+const isCustomPrompt = computed(() => !!customPrompt.value)
+const activePrompt = computed(() => customPrompt.value || screenerPrompt.value)
+
+function startEditPrompt() {
+  editPromptText.value = activePrompt.value
+  editingPrompt.value = true
+}
+
+function applyCustomPrompt() {
+  if (!editPromptText.value.trim()) return
+  customPrompt.value = editPromptText.value.trim()
+  editingPrompt.value = false
+  fetchScreenStocks()
+}
+
+function resetPrompt() {
+  customPrompt.value = ''
+  editingPrompt.value = false
+  fetchScreenStocks()
+}
+
 async function fetchScreenStocks() {
-  if (!activeStrategy.value) return
+  if (!activeStrategy.value || !activePrompt.value) return
   screenLoading.value = true
   try {
-    const res = await fetch(`/api/stock/screen?strategy=${activeStrategy.value}&count=10`)
+    const res = await fetch('/api/stock/xuangu', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: activePrompt.value })
+    })
     const json = await res.json()
     if (json.ok) screenStocks.value = json.data.stocks
   } catch (e) {
@@ -287,8 +333,8 @@ async function fetchScreenStocks() {
   }
 }
 
-watch(judgment, (v) => {
-  if (v && activeStrategy.value) fetchScreenStocks()
+watch(activeStrategy, (v) => {
+  if (v) fetchScreenStocks()
 })
 
 function fmtFlow(v) {
@@ -296,6 +342,13 @@ function fmtFlow(v) {
   const abs = Math.abs(v)
   const str = abs >= 10000 ? (abs / 10000).toFixed(1) + '亿' : abs.toFixed(0) + '万'
   return (v >= 0 ? '+' : '-') + str
+}
+
+function fmtCap(v) {
+  if (!v) return ''
+  if (v >= 1e8) return (v / 1e8).toFixed(0) + '亿'
+  if (v >= 1e4) return (v / 1e4).toFixed(0) + '万'
+  return v.toFixed(0)
 }
 
 function goToStock(code, name) {
@@ -363,6 +416,8 @@ function formatChange(val) {
 }
 
 let intradayTimer = null
+let judgmentTimer = null
+const JUDGMENT_INTERVAL = 6 * 60 * 1000 // 6 分钟
 
 function startIntradayTimer() {
   if (intradayTimer) return
@@ -370,12 +425,31 @@ function startIntradayTimer() {
   intradayTimer = setInterval(fetchIndexIntraday, REFRESH_INTERVAL)
 }
 
+function startJudgmentTimer() {
+  if (judgmentTimer) return
+  judgmentTimer = setInterval(() => marketStore.fetchAll(), JUDGMENT_INTERVAL)
+}
+
+function refreshJudgment() {
+  marketStore.fetchAll()
+}
+
 function stopIntradayTimer() {
   if (intradayTimer) { clearInterval(intradayTimer); intradayTimer = null }
 }
 
+function stopJudgmentTimer() {
+  if (judgmentTimer) { clearInterval(judgmentTimer); judgmentTimer = null }
+}
+
 function onVisibilityChange() {
-  document.hidden ? stopIntradayTimer() : startIntradayTimer()
+  if (document.hidden) {
+    stopIntradayTimer()
+    stopJudgmentTimer()
+  } else {
+    startIntradayTimer()
+    startJudgmentTimer()
+  }
 }
 
 async function fetchIndexIntraday() {
@@ -393,6 +467,7 @@ async function fetchIndexIntraday() {
 onMounted(async () => {
   await marketStore.fetchAll()
   startIntradayTimer()
+  startJudgmentTimer()
   document.addEventListener('visibilitychange', onVisibilityChange)
   // Staggered reveal animations
   requestAnimationFrame(() => {
@@ -403,6 +478,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopIntradayTimer()
+  stopJudgmentTimer()
   document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>
@@ -503,6 +579,8 @@ onBeforeUnmount(() => {
   position: relative;
   overflow: hidden;
   transition: border-color 0.3s, transform 0.2s;
+  min-height: 154px;
+  contain: layout style;
 }
 
 .index-card:hover {
@@ -556,6 +634,7 @@ onBeforeUnmount(() => {
   margin: 0 -4px -4px;
   border-top: 1px solid var(--border);
   padding-top: 12px;
+  min-height: 82px;
 }
 
 /* ===== MAIN GRID ===== */
@@ -775,6 +854,10 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.refresh-btn {
+  margin-left: auto;
+}
+
 .title-icon {
   font-size: 14px;
 }
@@ -782,6 +865,7 @@ onBeforeUnmount(() => {
 .signals-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
+  grid-auto-rows: 80px;
   gap: 10px;
 }
 
@@ -795,7 +879,9 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-sm);
   opacity: 0;
   transform: translateY(8px);
-  transition: border-color 0.2s, background 0.2s;
+  transition: opacity 0.3s, transform 0.3s, border-color 0.2s, background 0.2s;
+  min-height: 80px;
+  contain: layout style;
 }
 
 .signal-card.signal-enter {
@@ -850,6 +936,10 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: var(--text-secondary);
   line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .signal-card__tag {
@@ -1089,6 +1179,16 @@ onBeforeUnmount(() => {
   margin-bottom: 6px;
 }
 
+.prompt-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.prompt-actions .btn.primary {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .prompt-label {
   font-size: 12px;
   font-weight: 600;
@@ -1110,6 +1210,20 @@ onBeforeUnmount(() => {
   overflow-y: auto;
 }
 
+.prompt-edit {
+  width: 100%;
+  background: var(--bg-primary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  resize: vertical;
+  outline: none;
+}
+
 .prompt-hint {
   font-size: 11px;
   color: var(--text-muted);
@@ -1121,6 +1235,19 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   padding: 20px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.screen-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px;
+}
+
+.screen-empty__text {
   font-size: 13px;
   color: var(--text-secondary);
 }

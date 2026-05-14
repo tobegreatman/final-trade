@@ -2,7 +2,20 @@ import Koa from 'koa'
 import Router from '@koa/router'
 import cors from '@koa/cors'
 import logger from 'koa-logger'
+import bodyParser from 'koa-bodyparser'
 import https from 'https'
+import {
+  fetchIndicesFallback,
+  fetchIndicesIntradayFallback,
+  fetchStockKlineFallback,
+  fetchStockKline5yFallback,
+  fetchStockIntradayFallback,
+  fetchStockIntraday5dFallback,
+  fetchStockBasicFallback,
+  fetchBatchQuotesFallback,
+  searchStockFallback,
+  fetchBreadthFallback
+} from './fallback.js'
 
 // 交易日期：9点前视为前一交易日，9点后视为当日
 function getTradeDate() {
@@ -14,10 +27,22 @@ function getTradeDate() {
   return `${y}${m}${d}`
 }
 
+// 服务端缓存：避免重复请求东方财富 API
+const apiCache = new Map()
+function getCached(key) {
+  const entry = apiCache.get(key)
+  if (entry && Date.now() - entry.ts < 5 * 60 * 1000) return entry.data
+  return null
+}
+function setCache(key, data) {
+  apiCache.set(key, { data, ts: Date.now() })
+}
+
 const app = new Koa()
 const router = new Router()
 
 app.use(cors())
+app.use(bodyParser())
 app.use(logger())
 
 const EM_HEADERS = {
@@ -25,47 +50,9 @@ const EM_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 
-// 合成分时数据：从日K线 OHLC 插值生成 240 个分钟点
-function syntheticIntraday(open, high, low, close) {
-  const isUp = close >= open
-  // 根据涨跌决定路径：涨→先探低再冲高；跌→先冲高再探低
-  const wp = isUp ? [open, low, high, close] : [open, high, low, close]
-  const range = (high - low) || 1
-  const points = []
-  for (let i = 0; i < 240; i++) {
-    // 3 段插值：0-80, 80-160, 160-240
-    const seg = Math.min(Math.floor(i / 80), 2)
-    const t = (i - seg * 80) / 80
-    const val = wp[seg] + (wp[seg + 1] - wp[seg]) * t
-    // 生成时间标签
-    let h, m
-    if (i < 120) { const tot = 570 + i; h = Math.floor(tot / 60); m = tot % 60 }
-    else { const tot = 780 + (i - 120); h = Math.floor(tot / 60); m = tot % 60 }
-    points.push({
-      time: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`,
-      close: Math.round(val * 100) / 100,
-      avg: Math.round(val * 100) / 100,
-      volume: 0
-    })
-  }
-  return points
-}
-
-// 从 K 线获取最近一根的 OHLC 并合成分时
-async function fallbackIntradayFromKline(secid) {
-  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=1&end=${getTradeDate()}&lmt=2`
-  const data = await fetchJSON(url)
-  const klines = data.data?.klines || []
-  if (!klines.length) return null
-  const p = klines[klines.length - 1].split(',')
-  const open = +p[1], close = +p[2], high = +p[3], low = +p[4]
-  const preClose = klines.length >= 2 ? +klines[klines.length - 2].split(',')[2] : close
-  return { preClose, trends: syntheticIntraday(open, high, low, close) }
-}
-
-function fetchJSONviaHttps(url) {
+function fetchJSONviaHttps(url, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: EM_HEADERS }, (res) => {
+    const req = https.get(url, { headers: EM_HEADERS }, (res) => {
       if (res.statusCode < 200 || res.statusCode >= 300) {
         res.resume()
         return reject(new Error(`HTTP ${res.statusCode}`))
@@ -76,16 +63,20 @@ function fetchJSONviaHttps(url) {
         try { resolve(JSON.parse(body)) } catch (e) { reject(e) }
       })
     }).on('error', reject)
+    req.setTimeout(timeoutMs, () => { req.destroy(new Error('timeout')) })
   })
 }
 
-async function fetchJSON(url) {
+async function fetchJSON(url, timeoutMs = 8000) {
   try {
-    const res = await fetch(url, { headers: EM_HEADERS })
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+    const res = await fetch(url, { headers: EM_HEADERS, signal: ctrl.signal })
+    clearTimeout(timer)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return await res.json()
   } catch (e) {
-    return fetchJSONviaHttps(url)
+    return fetchJSONviaHttps(url, timeoutMs)
   }
 }
 
@@ -95,6 +86,16 @@ function ok(data) {
 
 function fail(msg) {
   return { ok: false, error: msg }
+}
+
+// 腾讯分钟 API 的 volume 是累计量，转换为分时成交量（仅用于腾讯 fallback 路径）
+function diffVolume(trends) {
+  for (let i = trends.length - 1; i > 0; i--) {
+    if (trends[i].time.slice(0, 10) === trends[i - 1].time.slice(0, 10)) {
+      trends[i].volume = Math.max(0, trends[i].volume - trends[i - 1].volume)
+    }
+  }
+  return trends
 }
 
 // === Health ===
@@ -118,6 +119,8 @@ const INDEX_SECIDS = {
 }
 
 router.get('/api/market/indices', async (ctx) => {
+  const cached = getCached('indices')
+  if (cached) { ctx.body = ok(cached); return }
   try {
     // 获取三大指数实时行情
     const quoteUrl = `https://push2his.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=${INDEX_SECIDS.sh},${INDEX_SECIDS.sz},${INDEX_SECIDS.cyb}&fields=f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21`
@@ -157,6 +160,26 @@ router.get('/api/market/indices', async (ctx) => {
       } catch (e) { /* kline 失败不影响行情 */ }
     }
 
+    // K 线不足时从腾讯补取
+    const tcMap = { sh: 'sh000001', sz: 'sz399001', cyb: 'sz399006' }
+    for (const [key, tc] of Object.entries(tcMap)) {
+      if (indices[key].klines.length < 35) {
+        try {
+          const kd = await fetchJSON(`https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${tc},day,,,120,`)
+          const raw = kd.data?.[tc]?.day || kd.data?.[tc]?.qfqday || []
+          if (raw.length > indices[key].klines.length) {
+            indices[key].klines = raw.map(k => ({
+              date: k[0], open: +k[1], close: +k[2], high: +k[3], low: +k[4],
+              volume: +k[5], amount: +(k[6] || 0)
+            }))
+            const closes = indices[key].klines.map(k => k.close)
+            const calcMA = (arr, n) => arr.length >= n ? arr.slice(-n).reduce((a, b) => a + b, 0) / n : null
+            indices[key].ma = { ma20: calcMA(closes, 20), ma60: calcMA(closes, 60), ma120: calcMA(closes, 120) }
+          }
+        } catch (e) { /* 腾讯 K 线也失败 */ }
+      }
+    }
+
     // 填充实时行情
     if (quoteData.data && quoteData.data.diff) {
       const diff = quoteData.data.diff
@@ -181,13 +204,22 @@ router.get('/api/market/indices', async (ctx) => {
     }
 
     ctx.body = ok(indices)
+    setCache('indices', indices)
   } catch (e) {
-    ctx.body = fail(e.message)
+    try {
+      const fb = await fetchIndicesFallback()
+      ctx.body = ok(fb)
+      setCache('indices', fb)
+    } catch (e2) {
+      ctx.body = fail(e.message)
+    }
   }
 })
 
 // === Market Breadth (涨跌家数) ===
 router.get('/api/market/breadth', async (ctx) => {
+  const cached = getCached('breadth')
+  if (cached) { ctx.body = ok(cached); return }
   try {
     // 沪市
     const shUrl = 'https://push2his.eastmoney.com/api/qt/ulist.np/get?fltt=2&secids=1.000001&fields=f104,f105,f106'
@@ -198,14 +230,21 @@ router.get('/api/market/breadth', async (ctx) => {
 
     const sh = shData.data?.diff?.[0] || {}
     const sz = szData.data?.diff?.[0] || {}
-
-    ctx.body = ok({
+    const data = {
       up: (sh.f104 || 0) + (sz.f104 || 0),
       down: (sh.f105 || 0) + (sz.f105 || 0),
       flat: (sh.f106 || 0) + (sz.f106 || 0)
-    })
+    }
+    ctx.body = ok(data)
+    setCache('breadth', data)
   } catch (e) {
-    ctx.body = fail(e.message)
+    try {
+      const fb = await fetchBreadthFallback()
+      ctx.body = ok(fb)
+      setCache('breadth', fb)
+    } catch (e2) {
+      ctx.body = fail(e.message)
+    }
   }
 })
 
@@ -238,21 +277,37 @@ router.get('/api/market/indices/intraday', async (ctx) => {
       } catch (e) { /* trends2 失败，不降级 */ }
       result[key] = { name, code: '', preClose: 0, trends: [] }
     }
+    // 东方财富全失败时尝试腾讯 fallback
+    const hasData = Object.values(result).some(r => r.trends?.length > 0)
+    if (!hasData) {
+      try {
+        const fb = await fetchIndicesIntradayFallback()
+        for (const key of Object.keys(fb)) diffVolume(fb[key]?.trends || [])
+        ctx.body = ok(fb)
+        return
+      } catch (e2) { /* fallback 也失败，用空数据 */ }
+    }
     ctx.body = ok(result)
   } catch (e) {
-    ctx.body = fail(e.message)
+    try {
+      const fb = await fetchIndicesIntradayFallback()
+      for (const key of Object.keys(fb)) diffVolume(fb[key]?.trends || [])
+      ctx.body = ok(fb)
+    } catch (e2) {
+      ctx.body = fail(e.message)
+    }
   }
 })
 
 // === Northbound (北向资金) ===
 router.get('/api/market/northbound', async (ctx) => {
+  const cached = getCached('northbound')
+  if (cached) { ctx.body = ok(cached); return }
   try {
     const url = 'https://push2his.eastmoney.com/api/qt/kamt.kline/get?fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=101&lmt=5'
     const data = await fetchJSON(url)
     const flows = []
     if (data.data) {
-      // s2n 格式: date, 已用额度(万元), 总额度(万元), 余额
-      // p[1] = 当日北向净流入（已用额度），单位万元
       const s2n = data.data.s2n || []
       const hk2sh = data.data.hk2sh || []
       const hk2sz = data.data.hk2sz || []
@@ -262,7 +317,6 @@ router.get('/api/market/northbound', async (ctx) => {
         const shP = hk2sh[i]?.split(',') || []
         const szP = hk2sz[i]?.split(',') || []
         const date = s2nP[0] || shP[0] || szP[0] || ''
-        // 优先用 s2n 合计，其次用 hk2sh+hk2sz 求和
         const s2nFlow = +s2nP[1] || 0
         const shFlow = +shP[1] || 0
         const szFlow = +szP[1] || 0
@@ -271,6 +325,7 @@ router.get('/api/market/northbound', async (ctx) => {
       }
     }
     ctx.body = ok(flows)
+    setCache('northbound', flows)
   } catch (e) {
     ctx.body = fail(e.message)
   }
@@ -278,8 +333,9 @@ router.get('/api/market/northbound', async (ctx) => {
 
 // === Margin Balance (融资余额) ===
 router.get('/api/market/margin', async (ctx) => {
+  const cached = getCached('margin')
+  if (cached) { ctx.body = ok(cached); return }
   try {
-    // 获取沪深京两市合计融资余额近 10 日数据
     const url = 'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPTA_RZRQ_LSHJ&columns=ALL&pageSize=10&sortColumns=DIM_DATE&sortTypes=-1&source=WEB&client=WEB'
     const data = await fetchJSON(url)
     if (!data.result?.data?.length) {
@@ -288,14 +344,15 @@ router.get('/api/market/margin', async (ctx) => {
     }
     const items = data.result.data.map(d => ({
       date: d.DIM_DATE?.slice(0, 10),
-      rzBalance: d.RZYE,        // 融资余额（元）
-      rzBuy: d.RZMRE,            // 融资买入额
-      rzRepay: d.RZCHE,          // 融资偿还额
-      rzNetBuy: d.RZJME,         // 融资净买入额
-      rqBalance: d.RQYE,         // 融券余额
-      totalBalance: d.RZRQYE     // 融资融券余额
+      rzBalance: d.RZYE,
+      rzBuy: d.RZMRE,
+      rzRepay: d.RZCHE,
+      rzNetBuy: d.RZJME,
+      rqBalance: d.RQYE,
+      totalBalance: d.RZRQYE
     }))
     ctx.body = ok(items)
+    setCache('margin', items)
   } catch (e) {
     ctx.body = fail(e.message)
   }
@@ -354,7 +411,11 @@ router.get('/api/stock/:code/kline', async (ctx) => {
     const prevClose = klines.length >= 2 ? klines[klines.length - 2].close : null
     ctx.body = ok({ klines, prevClose, code: data.data?.code, name: data.data?.name })
   } catch (e) {
-    ctx.body = fail(e.message)
+    try {
+      ctx.body = ok(await fetchStockKlineFallback(ctx.params.code))
+    } catch (e2) {
+      ctx.body = fail(e.message)
+    }
   }
 })
 
@@ -371,88 +432,75 @@ router.get('/api/stock/:code/kline5y', async (ctx) => {
     })
     ctx.body = ok({ klines, code: data.data?.code, name: data.data?.name })
   } catch (e) {
-    ctx.body = fail(e.message)
+    try {
+      ctx.body = ok(await fetchStockKline5yFallback(ctx.params.code))
+    } catch (e2) {
+      ctx.body = fail(e.message)
+    }
   }
 })
 
 // === Stock Intraday (分时) ===
 router.get('/api/stock/:code/intraday', async (ctx) => {
+  const code = ctx.params.code
+  const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`
   try {
-    const code = ctx.params.code
-    const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`
-    try {
-      const url = `https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1`
-      const data = await fetchJSON(url)
-      const trends = (data.data?.trends || []).map(t => {
-        const p = t.split(',')
-        return { time: p[0], close: +p[2], avg: +p[3], volume: +p[5] }
-      })
-      if (trends.length > 10) {
-        ctx.body = ok({
-          code: data.data?.code,
-          name: data.data?.name,
-          preClose: data.data?.preClose || 0,
-          trends
-        })
-        return
-      }
-    } catch (e) { /* trends2 失败，走 fallback */ }
-    // Fallback: 从 K 线 OHLC 合成分时
-    const fb = await fallbackIntradayFromKline(secid)
-    ctx.body = ok({ code, name: '', preClose: fb?.preClose || 0, trends: fb?.trends || [] })
-  } catch (e) {
-    ctx.body = fail(e.message)
+    const url = `https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1`
+    const data = await fetchJSON(url)
+    const trends = (data.data?.trends || []).map(t => {
+      const p = t.split(',')
+      return { time: p[0], close: +p[2], avg: +p[3], volume: +p[5] }
+    })
+    if (trends.length > 10) {
+      const result = { code: data.data?.code, name: data.data?.name, preClose: data.data?.preClose || 0, trends }
+      setCache('intraday_' + code, result)
+      ctx.body = ok(result)
+      return
+    }
+  } catch (e) { /* EM failed */ }
+  // 优先用缓存（保留均价线），缓存空才走腾讯
+  const cached = getCached('intraday_' + code)
+  if (cached) { ctx.body = ok(cached); return }
+  try {
+    const fb = await fetchStockIntradayFallback(code)
+    diffVolume(fb.trends)
+    ctx.body = ok(fb)
+  } catch (e2) {
+    ctx.body = fail(e2.message)
   }
 })
 
 // === Stock Intraday 5-Day (5日分时合集) ===
 router.get('/api/stock/:code/intraday5d', async (ctx) => {
+  const code = ctx.params.code
+  // 优先用缓存（EM 成功时缓存 5 分钟）
+  const cached = getCached('intraday5d_' + code)
+  if (cached) { ctx.body = ok(cached); return }
+
   try {
-    const code = ctx.params.code
     const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`
-    // 取最近 6 根日 K 线（前 5 根合成，第 6 根备用算 preClose）
-    const klineUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=1&end=${getTradeDate()}&lmt=6`
-    const klineData = await fetchJSON(klineUrl)
-    const klines = (klineData.data?.klines || []).map(l => {
-      const p = l.split(',')
-      return { date: p[0], open: +p[1], close: +p[2], high: +p[3], low: +p[4] }
+    const url = `https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=5`
+    const data = await fetchJSON(url)
+    const trends = (data.data?.trends || []).map(t => {
+      const p = t.split(',')
+      return { time: p[0], close: +p[2], avg: +p[3], volume: +p[5] }
     })
-
-    let allTrends = []
-    // 取当天真实分时
-    let todayTrends = []
-    try {
-      const url = `https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1`
-      const data = await fetchJSON(url)
-      todayTrends = (data.data?.trends || []).map(t => {
-        const p = t.split(',')
-        return { time: p[0], close: +p[2], avg: +p[3], volume: +p[5] }
-      })
-    } catch (e) { /* ignore */ }
-
-    // 拼接前几天的合成数据 + 今天的真实数据
-    const todayDate = klines.length ? klines[klines.length - 1].date : ''
-    const prevDays = klines.filter(k => k.date !== todayDate).slice(-5)
-
-    for (const k of prevDays) {
-      const synth = syntheticIntraday(k.open, k.high, k.low, k.close)
-      synth.forEach(p => { p.time = k.date + ' ' + p.time })
-      allTrends.push(...synth)
+    if (trends.length > 100) {
+      const result = { code: data.data?.code, preClose: data.data?.preClose || 0, trends }
+      setCache('intraday5d_' + code, result)
+      ctx.body = ok(result)
+      return
     }
-
-    if (todayTrends.length > 10) {
-      allTrends.push(...todayTrends)
-    } else if (klines.length) {
-      const k = klines[klines.length - 1]
-      const synth = syntheticIntraday(k.open, k.high, k.low, k.close)
-      synth.forEach(p => { p.time = k.date + ' ' + p.time })
-      allTrends.push(...synth)
-    }
-
-    const preClose = klines.length >= 2 ? klines[klines.length - 2].close : (klines[0]?.close || 0)
-    ctx.body = ok({ code, preClose, trends: allTrends })
+    throw new Error('trends2 insufficient')
   } catch (e) {
-    ctx.body = fail(e.message)
+    // EM 失败 → 腾讯 fallback（仅当天数据，不做缓存）
+    try {
+      const fb = await fetchStockIntraday5dFallback(code)
+      diffVolume(fb.trends)
+      ctx.body = ok(fb)
+    } catch (e2) {
+      ctx.body = fail(e2.message)
+    }
   }
 })
 
@@ -482,11 +530,13 @@ router.get('/api/stock/:code/basic', async (ctx) => {
       low52w: d.f170
     })
   } catch (e) {
-    ctx.body = fail(e.message)
+    try {
+      ctx.body = ok(await fetchStockBasicFallback(ctx.params.code))
+    } catch (e2) {
+      ctx.body = fail(e.message)
+    }
   }
 })
-
-// === Batch Quotes ===
 router.get('/api/stock/batch/quotes', async (ctx) => {
   try {
     const codes = ctx.query.codes || ''
@@ -517,11 +567,14 @@ router.get('/api/stock/batch/quotes', async (ctx) => {
     }
     ctx.body = ok(result)
   } catch (e) {
-    ctx.body = fail(e.message)
+    try {
+      const codeList = (ctx.query.codes || '').split(',').filter(Boolean)
+      ctx.body = ok(await fetchBatchQuotesFallback(codeList))
+    } catch (e2) {
+      ctx.body = fail(e.message)
+    }
   }
 })
-
-// === Stock Search ===
 router.get('/api/stock/search', async (ctx) => {
   try {
     const kw = ctx.query.kw || ''
@@ -541,7 +594,11 @@ router.get('/api/stock/search', async (ctx) => {
       }))
     ctx.body = ok(items)
   } catch (e) {
-    ctx.body = fail(e.message)
+    try {
+      ctx.body = ok(await searchStockFallback(ctx.query.kw || ''))
+    } catch (e2) {
+      ctx.body = fail(e.message)
+    }
   }
 })
 
@@ -555,13 +612,15 @@ router.get('/api/stock/screen', async (ctx) => {
     const val = (v) => (typeof v === 'number' ? v : null)
 
     // 第一步: datacenter 获取 ROE 合格的股票池
-    const roeUrl = 'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_LICO_FN_CPD&columns=SECURITY_CODE,WEIGHTAVG_ROE,SJLTZ,YSTZ&filter=(WEIGHTAVG_ROE%3E12)(WEIGHTAVG_ROE%3C50)(SECURITY_TYPE_CODE%3D%22058001001%22)(ISNEW%3D%221%22)&pageSize=3000&sortColumns=WEIGHTAVG_ROE&sortTypes=-1&source=WEB&client=WEB'
-    const roeData = await fetchJSON(roeUrl)
-    const roeList = roeData.result?.data || []
     const roeMap = new Map()
-    for (const r of roeList) {
-      roeMap.set(r.SECURITY_CODE, { roe: r.WEIGHTAVG_ROE, profitGrowth: r.SJLTZ, revenueGrowth: r.YSTZ })
-    }
+    try {
+      const roeUrl = 'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_LICO_FN_CPD&columns=SECURITY_CODE,WEIGHTAVG_ROE,SJLTZ,YSTZ&filter=(WEIGHTAVG_ROE%3E12)(WEIGHTAVG_ROE%3C50)(SECURITY_TYPE_CODE%3D%22058001001%22)(ISNEW%3D%221%22)&pageSize=3000&sortColumns=WEIGHTAVG_ROE&sortTypes=-1&source=WEB&client=WEB'
+      const roeData = await fetchJSON(roeUrl)
+      const roeList = roeData.result?.data || []
+      for (const r of roeList) {
+        roeMap.set(r.SECURITY_CODE, { roe: r.WEIGHTAVG_ROE, profitGrowth: r.SJLTZ, revenueGrowth: r.YSTZ })
+      }
+    } catch (e) { /* ROE 数据获取失败，跳过 ROE 过滤 */ }
 
     // 第二步: 获取行情数据
     const isST = (name) => /ST|退/.test(name || '')
@@ -572,14 +631,15 @@ router.get('/api/stock/screen', async (ctx) => {
       const fs = 'm:0+t:6+f:!2,m:0+t:80+f:!2,m:1+t:2+f:!2,m:1+t:23+f:!2'
       const fields = 'f2,f3,f4,f6,f8,f9,f10,f12,f14,f20,f21,f23,f62,f115,f128'
       const clistUrl = `https://push2his.eastmoney.com/api/qt/clist/get?pn=1&pz=500&np=1&fltt=2&invt=2&fid=f21&po=1&fs=${fs}&fields=${fields}`
-      const clistData = await fetchJSON(clistUrl)
+      let clistData
+      try { clistData = await fetchJSON(clistUrl) } catch (e) { ctx.body = ok({ strategy, prompt: '', stocks: [] }); return }
       const diff = clistData.data?.diff || []
 
       stocks = diff
         .filter(s => {
           if (isST(s.f14)) return false
           const code = String(s.f12)
-          if (!roeMap.has(code)) return false
+          if (roeMap.size && !roeMap.has(code)) return false
           const cap = val(s.f21) || 0
           const pe = val(s.f115) || val(s.f9) || 0
           const turnover = val(s.f8) || 0
@@ -592,14 +652,15 @@ router.get('/api/stock/screen', async (ctx) => {
       const fs = 'm:0+t:6+f:!2,m:0+t:80+f:!2,m:1+t:2+f:!2,m:1+t:23+f:!2'
       const fields = 'f2,f3,f4,f6,f8,f9,f10,f12,f14,f20,f21,f23,f62,f115,f128'
       const clistUrl = `https://push2his.eastmoney.com/api/qt/clist/get?pn=1&pz=200&np=1&fltt=2&invt=2&fid=f62&po=1&fs=${fs}&fields=${fields}`
-      const clistData = await fetchJSON(clistUrl)
+      let clistData
+      try { clistData = await fetchJSON(clistUrl) } catch (e) { ctx.body = ok({ strategy, prompt: '', stocks: [] }); return }
       const diff = clistData.data?.diff || []
 
       stocks = diff
         .filter(s => {
           if (isST(s.f14)) return false
           const code = String(s.f12)
-          if (!roeMap.has(code)) return false
+          if (roeMap.size && !roeMap.has(code)) return false
           const cap = val(s.f21) || 0
           const pe = val(s.f115) || val(s.f9) || 0
           const turnover = val(s.f8) || 0
@@ -631,6 +692,87 @@ router.get('/api/stock/screen', async (ctx) => {
       })
 
     ctx.body = ok({ strategy, stocks: result })
+  } catch (e) {
+    ctx.body = fail(e.message)
+  }
+})
+
+// === Xuangu Natural Language Screening ===
+function parseChineseNum(str) {
+  if (!str || typeof str !== 'string') return null
+  str = str.replace(/,/g, '')
+  if (str.endsWith('亿')) return Math.round(parseFloat(str) * 1e8)
+  if (str.endsWith('万')) return Math.round(parseFloat(str) * 1e4)
+  const n = parseFloat(str)
+  return isNaN(n) ? null : n
+}
+
+router.post('/api/stock/xuangu', async (ctx) => {
+  try {
+    const { prompt } = ctx.request.body || {}
+    if (!prompt) { ctx.body = fail('prompt不能为空'); return }
+
+    const rid = Date.now().toString(36) + Math.random().toString(36).slice(2, 18)
+    const body = {
+      keyWord: prompt,
+      pageSize: 20,
+      pageNo: 1,
+      xcId: '',
+      cmd5: '',
+      client: 'pc',
+      biz: 'pc_ai_select_stocks',
+      fingerprint: rid.slice(0, 16),
+      matchWord: '',
+      timestamp: Date.now(),
+      shareToGuba: false,
+      requestId: rid,
+      dynamicType: 'COMMON',
+      allCode: true,
+      ownSelectAll: false,
+      needCorrect: true,
+      needShowStockNum: true,
+      ignoreRightsField: false,
+      needAmbiguousSuggest: false,
+      notExecuteCompute: false,
+      removedConditionIdList: []
+    }
+
+    const resp = await fetch('https://np-tjxg-b.eastmoney.com/api/smart-tag/stock/v3/comm/search-code', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Referer': 'https://xuangu.eastmoney.com/',
+        'Origin': 'https://xuangu.eastmoney.com',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
+      },
+      body: JSON.stringify(body)
+    })
+    const data = await resp.json()
+
+    if (data.code !== '100') { ctx.body = fail(data.msg || '选股服务异常'); return }
+
+    const result = data.data?.result || {}
+    const stocks = (result.dataList || []).map(s => ({
+      code: s.SECURITY_CODE,
+      name: s.SECURITY_SHORT_NAME,
+      price: parseChineseNum(s.NEWEST_PRICE),
+      change: parseChineseNum(s.CHG),
+      turnover: parseChineseNum(s.TURNOVER_RATE),
+      pe: parseChineseNum(s.PE_DYNAMIC),
+      pb: parseChineseNum(s.PB),
+      marketCap: parseChineseNum(s['CIRCULATION_MARKET_VALUE<140>']),
+      volume: s.VOLUME,
+      amount: parseChineseNum(s.TRADING_VOLUMES),
+      chgAmt: parseChineseNum(s.PCHG),
+      marketNum: s.MARKET_NUM,
+    }))
+
+    const conditions = (data.data?.responseConditionList || []).map(c => ({
+      describe: c.describe,
+      count: c.stockCount
+    }))
+
+    ctx.body = ok({ stocks, conditions, total: result.total || 0 })
   } catch (e) {
     ctx.body = fail(e.message)
   }

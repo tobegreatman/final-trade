@@ -1,15 +1,15 @@
 import { MARKET_STATUS } from './constants.js'
 
 /**
- * 六维大盘判定算法 v3
+ * 六维大盘判定算法 v4
  * 维度 1: MACD 状态（动量方向）
  * 维度 2: 涨跌家数（市场广度）
  * 维度 3: RSI 状态（超买超卖）
  * 维度 4: 融资余额（杠杆资金趋势）
  * 维度 5: 量价配合（资金确认）
- * 维度 6: 北向资金（外资方向）
+ * 维度 6: 涨跌停统计（市场情绪）
  */
-export function judgeMarket(indices, breadth, northbound, margin) {
+export function judgeMarket(indices, breadth, limitStats, margin) {
   const idx = indices.sh || {}
   const klines = idx.klines || []
   const ma = idx.ma || {}
@@ -49,11 +49,11 @@ export function judgeMarket(indices, breadth, northbound, margin) {
   if (vpSignal.bull) bullCount++
   if (vpSignal.bear) bearCount++
 
-  // 维度 6: 北向资金
-  const nbSignal = judgeNorthbound(northbound)
-  signals.push(nbSignal)
-  if (nbSignal.bull) bullCount++
-  if (nbSignal.bear) bearCount++
+  // 维度 6: 涨跌停统计
+  const ltSignal = judgeLimitStats(limitStats)
+  signals.push(ltSignal)
+  if (ltSignal.bull) bullCount++
+  if (ltSignal.bear) bearCount++
 
   const status = determineStatus(bullCount, bearCount)
   const confirmed = bullCount >= 3 || bearCount >= 3
@@ -281,33 +281,31 @@ function judgeMarginBalance(margin) {
   return { dimension: '融资余额', value: `${fmt(latest)}`, bull: false, bear: false, desc: `5日变动${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}%，无明显趋势` }
 }
 
-// ==================== 北向资金 ====================
-function judgeNorthbound(northbound) {
-  if (!northbound || !northbound.length) {
-    return { dimension: '北向资金', value: '数据不足', bull: false, bear: false, desc: '' }
+// ==================== 涨跌停统计 ====================
+function judgeLimitStats(limitStats) {
+  if (!limitStats || !limitStats.limitUp) {
+    return { dimension: '涨跌停', value: '数据不足', bull: false, bear: false, desc: '' }
   }
-  const allZero = northbound.every(d => !d.totalNet)
-  if (allZero) {
-    return { dimension: '北向资金', value: '数据不足', bull: false, bear: false, desc: '北向资金数据暂未更新' }
+  const { limitUp, limitDown, sealingRate, moneyEffect } = limitStats
+  const ratio = limitDown > 0 ? limitUp / limitDown : limitUp
+
+  // 涨停>100 + 封板率>70% + 赚钱效应>70 = 强势做多
+  if (limitUp > 100 && sealingRate > 70 && moneyEffect > 70) {
+    return { dimension: '涨跌停', value: `强势 ${limitUp}/${limitDown}家`, bull: true, bear: false, desc: `涨停${limitUp}家，封板率${sealingRate}%，赚钱效应${moneyEffect}%` }
   }
-  let consecutiveInflow = 0
-  let consecutiveOutflow = 0
-  for (let i = northbound.length - 1; i >= 0; i--) {
-    if (northbound[i].totalNet > 0) {
-      if (consecutiveOutflow > 0) break
-      consecutiveInflow++
-    } else {
-      if (consecutiveInflow > 0) break
-      consecutiveOutflow++
-    }
+  // 涨停>50 + 跌停<10 = 偏多
+  if (limitUp > 50 && limitDown < 10) {
+    return { dimension: '涨跌停', value: `偏多 ${limitUp}/${limitDown}家`, bull: true, bear: false, desc: `涨停${limitUp}家/跌停${limitDown}家，比值${ratio.toFixed(1)}` }
   }
-  if (consecutiveInflow >= 5) {
-    return { dimension: '北向资金', value: `连续${consecutiveInflow}日净流入`, bull: true, bear: false, desc: `连续${consecutiveInflow}日净流入` }
+  // 跌停>20 + 涨停<20 = 偏空
+  if (limitDown > 20 && limitUp < 20) {
+    return { dimension: '涨跌停', value: `偏空 ${limitUp}/${limitDown}家`, bull: false, bear: true, desc: `跌停${limitDown}家/涨停${limitUp}家，市场恐慌情绪升温` }
   }
-  if (consecutiveOutflow >= 5) {
-    return { dimension: '北向资金', value: `连续${consecutiveOutflow}日净流出`, bull: false, bear: true, desc: `连续${consecutiveOutflow}日净流出` }
+  // 跌停>50 + 封板率<30% = 极度恐慌
+  if (limitDown > 50 && sealingRate < 30) {
+    return { dimension: '涨跌停', value: `恐慌 ${limitUp}/${limitDown}家`, bull: false, bear: true, desc: `跌停${limitDown}家，封板率仅${sealingRate}%，市场极度恐慌` }
   }
-  return { dimension: '北向资金', value: '方向不明', bull: false, bear: false, desc: `近${northbound.length}日未达连续5日净流入/流出标准` }
+  return { dimension: '涨跌停', value: `${limitUp}/${limitDown}家`, bull: false, bear: false, desc: `涨停${limitUp}家/跌停${limitDown}家，封板率${sealingRate}%` }
 }
 
 // ==================== 综合判定 ====================
