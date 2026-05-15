@@ -73,21 +73,21 @@
           </div>
           <!-- Score bar -->
           <div class="score-bar">
-            <div class="score-segment bull" :style="{ flex: judgment?.score?.bull || 0 }">
-              {{ judgment?.score?.bull || 0 }} 牛
+            <div class="score-segment bull" :style="{ flex: judgment?.score?.bullW || 0 }">
+              {{ judgment?.score?.bull || 0 }}牛 <span class="score-wt">({{ judgment?.score?.bullW || 0 }})</span>
             </div>
             <div class="score-segment neutral" :style="{ flex: judgment?.score?.neutral || 0 }">
               {{ judgment?.score?.neutral || 0 }} 中
             </div>
-            <div class="score-segment bear" :style="{ flex: judgment?.score?.bear || 0 }">
-              {{ judgment?.score?.bear || 0 }} 熊
+            <div class="score-segment bear" :style="{ flex: judgment?.score?.bearW || 0 }">
+              {{ judgment?.score?.bear || 0 }}熊 <span class="score-wt">({{ judgment?.score?.bearW || 0 }})</span>
             </div>
           </div>
         </div>
 
         <!-- RIGHT: 6-Dimension Signal Table -->
         <div class="signals-panel">
-          <h2 class="panel-title">六维判据
+          <h2 class="panel-title">七维判据
             <button class="btn btn-sm btn-ghost refresh-btn" @click="refreshJudgment">刷新</button>
           </h2>
           <div class="signals-grid">
@@ -100,7 +100,11 @@
             >
               <div class="signal-card__indicator" :class="signalClass(sig)"></div>
               <div class="signal-card__body">
-                <div class="signal-card__dim">{{ sig.dimension }}</div>
+                <div class="signal-card__dim">
+                  {{ sig.dimension }}
+                  <span v-if="sig.divergence" class="div-badge" :class="sig.divergence">{{ sig.divergence === 'bullish' ? '底背离' : '顶背离' }}</span>
+                  <span v-if="sig.weight >= 1.5 && !sig.divergence" class="weight-badge">强</span>
+                </div>
                 <div class="signal-card__val">{{ sig.value }}</div>
                 <div class="signal-card__desc">{{ sig.desc }}</div>
               </div>
@@ -249,6 +253,7 @@ import { useMarketStore } from '../stores/market.js'
 import { judgeMarket } from '../utils/marketJudge.js'
 import { PRE_TRADE_CHECKLIST, REFRESH_INTERVAL } from '../utils/constants.js'
 import { getStrategyPreset, buildScreenerPrompt } from '../utils/screenerPrompt.js'
+import { saveJson } from '../utils/storage.js'
 import Sparkline from '../components/Sparkline.vue'
 
 const router = useRouter()
@@ -262,7 +267,15 @@ const checkedCount = computed(() => checklist.filter(c => c.checked).length)
 
 const judgment = computed(() => {
   if (!marketStore.indices || !marketStore.breadth || !marketStore.northbound) return null
-  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound, marketStore.margin)
+  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound, marketStore.margin, marketStore.breadthHistory, marketStore.limitStats, marketStore.prevStatus)
+})
+
+// 状态惯性：判定完成后持久化状态，下次判定作为惯性参考
+watch(() => judgment.value?.status, (newStatus) => {
+  if (newStatus && newStatus !== marketStore.prevStatus) {
+    marketStore.prevStatus = newStatus
+    saveJson('market_prev_status', newStatus)
+  }
 })
 
 // ==================== Strategy Stock Screening ====================
@@ -870,7 +883,7 @@ onBeforeUnmount(() => {
 .signals-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  grid-auto-rows: 80px;
+  grid-auto-rows: minmax(85px, auto);
   gap: 10px;
 }
 
@@ -885,8 +898,6 @@ onBeforeUnmount(() => {
   opacity: 0;
   transform: translateY(8px);
   transition: opacity 0.3s, transform 0.3s, border-color 0.2s, background 0.2s;
-  min-height: 80px;
-  contain: layout style;
 }
 
 .signal-card.signal-enter {
@@ -928,6 +939,43 @@ onBeforeUnmount(() => {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.div-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+.div-badge.bullish {
+  background: rgba(255, 69, 58, 0.15);
+  color: var(--red);
+}
+
+.div-badge.bearish {
+  background: rgba(48, 209, 88, 0.15);
+  color: var(--green);
+}
+
+.weight-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(0, 113, 227, 0.15);
+  color: var(--accent);
+  text-transform: none;
+}
+
+.score-wt {
+  font-size: 10px;
+  opacity: 0.7;
 }
 
 .signal-card__val {

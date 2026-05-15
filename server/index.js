@@ -355,20 +355,33 @@ router.get('/api/market/limit-stats', async (ctx) => {
     const [statsData, fenbuData] = await Promise.allSettled([fetchJSON(statsUrl), fetchJSON(fenbuUrl)])
 
     let limitUp = 0, limitDown = 0, sealingRate = 0, moneyEffect = 0, date = ''
+    let naturalLimit = 0, touchLimit = 0, t1PctChange = 0
     if (statsData.status === 'fulfilled' && statsData.value?.result?.data?.[0]) {
       const s = statsData.value.result.data[0]
       limitUp = s.LIMIT_NUMBERS || 0
       sealingRate = s.SEALING_RATE || 0
       moneyEffect = s.MONEYMAKING_EFFECT || 0
+      naturalLimit = s.NATURAL_LIMIT || 0
+      touchLimit = s.TOUCH_LIMIT || 0
+      t1PctChange = s.T1_PCTCHANGE || 0
       date = s.TRADE_DATE?.slice(0, 10) || ''
     }
     if (fenbuData.status === 'fulfilled' && fenbuData.value?.data?.fenbu) {
+      let fenbuUp = 0, fenbuDown = 0
       for (const item of fenbuData.value.data.fenbu) {
-        if (item['11'] != null) limitUp = limitUp || item['11']
-        if (item['-11'] != null) limitDown = item['-11']
+        // 涨停：主板±10% (10/11桶) + 创业板/科创板±20% (20桶)
+        if (item['10'] != null) fenbuUp += item['10']
+        if (item['11'] != null) fenbuUp += item['11']
+        if (item['20'] != null) fenbuUp += item['20']
+        // 跌停：同理
+        if (item['-10'] != null) fenbuDown += item['-10']
+        if (item['-11'] != null) fenbuDown += item['-11']
+        if (item['-20'] != null) fenbuDown += item['-20']
       }
+      if (!limitUp) limitUp = fenbuUp
+      limitDown = fenbuDown
     }
-    ctx.body = ok({ date, limitUp, limitDown, sealingRate, moneyEffect })
+    ctx.body = ok({ date, limitUp, limitDown, naturalLimit, touchLimit, sealingRate, moneyEffect, t1PctChange })
   } catch (e) {
     ctx.body = fail(e.message)
   }
