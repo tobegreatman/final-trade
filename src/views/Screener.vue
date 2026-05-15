@@ -172,6 +172,7 @@
 <script setup>
 import { ref, reactive, computed } from 'vue'
 import { MINE_SWEEPER_ITEMS, FUNDAMENTAL_DEFAULTS, PROSPERITY_OPTIONS, TECH_SIGNAL_OPTIONS } from '../utils/constants.js'
+import { buildScreenerPrompt } from '../utils/screenerPrompt.js'
 
 const openLayer = ref(1)
 const mines = reactive(MINE_SWEEPER_ITEMS.map(m => ({ ...m, checked: m.auto })))
@@ -193,123 +194,21 @@ const fundFields = [
 ]
 
 const minesChecked = computed(() => mines.filter(m => m.checked).length)
-
 const canGenerate = computed(() => minesChecked.value >= 5)
 
-// ==================== 手机端一句话选股 ====================
-// 只生成东方财富 NLP 可识别的语句，用中文逗号分隔
-const mobileStatement = computed(() => {
-  if (!canGenerate.value) return ''
-  const parts = []
-
-  // 排雷项
-  if (mines[0].checked) parts.push('非ST')
-  if (mines[1].checked) parts.push('非停牌')
-  if (mines[2].checked) parts.push('非北交所')
-  if (mines[3].checked) parts.push('非退市')
-  if (mines[4].checked) parts.push('商誉占净资产比例小于30%')
-  if (mines[5].checked) parts.push('大股东质押比例小于60%')
-  if (mines[6].checked) parts.push('审计意见为标准无保留意见')
-  if (mines[7].checked) parts.push('上市时间大于1年')
-
-  // 基本面
-  if (fundamentals.roe) parts.push(`ROE大于${fundamentals.roe}%`)
-  if (fundamentals.revenueGrowth) parts.push(`营收增长率大于${fundamentals.revenueGrowth}%`)
-  if (fundamentals.profitGrowth) parts.push(`净利润增长率大于${fundamentals.profitGrowth}%`)
-  if (fundamentals.debtRatio) parts.push(`资产负债率小于${fundamentals.debtRatio}%`)
-  if (fundamentals.cashflowPositive) parts.push('经营现金流为正')
-  if (fundamentals.peMin || fundamentals.peMax) {
-    const lo = fundamentals.peMin || 0
-    const hi = fundamentals.peMax || 999
-    parts.push(`市盈率${lo}到${hi}`)
-  }
-  parts.push('流通市值大于30亿')
-
-  // 景气度
-  if (selectedProsperity.value === 'institutional') {
-    parts.push('机构持股比例较上季度增加')
-    parts.push('北向资金持股比例增加')
-    parts.push('近30日主力净流入')
-  } else if (selectedProsperity.value === 'earnings') {
-    parts.push('净利润增长率大于30%')
-    parts.push('营收增长率大于20%')
-  } else if (selectedProsperity.value === 'dragonTiger') {
-    parts.push('近3日登上龙虎榜')
-    parts.push('换手率3%到20%')
-  }
-
-  // 技术信号
-  if (selectedTech.value === 'trendBreak') {
-    parts.push('MACD金叉')
-    parts.push('20日均线向上')
-    parts.push('60日均线向上')
-  } else if (selectedTech.value === 'pullback') {
-    parts.push('股价大于60日均线')
-    parts.push('60日均线向上')
-    parts.push('股价接近20日均线，偏离不超过2%')
-    parts.push('5日均量小于20日均量的70%')
-  } else if (selectedTech.value === 'bottomConfirm') {
-    parts.push('RSI小于30拐头向上')
-    parts.push('MACD金叉')
-  }
-
-  return parts.join('，')
-})
-
-// ==================== 需 PC 端/手动设置的条件 ====================
-const manualConditions = computed(() => {
-  if (!canGenerate.value) return []
-  const items = []
-
-  // F10 手动项
-  mines.filter(m => !m.auto && m.checked).forEach(m => {
-    items.push({ label: m.label, where: m.desc })
+const promptResult = computed(() => {
+  if (!canGenerate.value) return { mobileStatement: '', manualConditions: [], pcFormula: '' }
+  return buildScreenerPrompt({
+    mines,
+    fundamentals: { ...fundamentals },
+    prosperity: selectedProsperity.value,
+    tech: selectedTech.value,
   })
-
-  // 景气度中 NLP 不支持的部分
-  if (selectedProsperity.value === 'earnings') {
-    items.push({ label: '近60日研报数量≥3', where: '东方财富个股页 → 研报，或 Choice 终端' })
-  } else if (selectedProsperity.value === 'dragonTiger') {
-    items.push({ label: '买方机构席位 > 卖方机构席位', where: '东方财富龙虎榜 data.eastmoney.com/stock/lhb.html，人工确认' })
-  }
-
-  // 技术信号中 NLP 不支持的部分
-  if (selectedTech.value === 'trendBreak') {
-    items.push({ label: '放量突破20日高点', where: 'PC端综合选股，或通达信公式' })
-  } else if (selectedTech.value === 'bottomConfirm') {
-    items.push({ label: '从高点下跌超40%后放量', where: 'PC端综合选股，或通达信公式' })
-  }
-
-  return items
 })
 
-// ==================== PC 端公式 ====================
-const pcFormula = computed(() => {
-  if (!canGenerate.value) return ''
-  const lines = []
-  // 排雷
-  if (mines[0].checked) lines.push('NOT(NAMELIKE("ST") OR NAMELIKE("*ST"))')
-  if (mines[2].checked) lines.push('NOT(CODELIKE("8") OR CODELIKE("4"))') // 排除北交所
-  if (mines[1].checked) lines.push('DYNAINFO(17)>0')
-  // 基本面
-  if (fundamentals.roe) lines.push(`FINANCE(33)/FINANCE(34)*100>=${fundamentals.roe}`)
-  if (fundamentals.profitGrowth) lines.push(`FINANCE(43)>=${fundamentals.profitGrowth}`)
-  if (fundamentals.debtRatio) lines.push(`FINANCE(9)<=${fundamentals.debtRatio}`)
-  // 景气度
-  if (selectedProsperity.value === 'dragonTiger') {
-    lines.push('换手率>3 AND 换手率<20')
-  }
-  // 技术信号
-  if (selectedTech.value === 'trendBreak') {
-    lines.push('C>REF(HHV(H,20),1) AND V/REF(MA(V,20),1)>1.5 AND MACD.DIF>MACD.DEA AND MACD.MACD>0 AND MA(C,20)>MA(C,60) AND MA(C,60)>REF(MA(C,60),5)')
-  } else if (selectedTech.value === 'pullback') {
-    lines.push('C>MA(C,60) AND MA(C,60)>REF(MA(C,60),5) AND L<=MA(C,20)*1.02 AND C>=MA(C,20)*0.98 AND MA(V,5)<MA(V,20)*0.7')
-  } else if (selectedTech.value === 'bottomConfirm') {
-    lines.push('HHV(H,120)/C>1.4 AND C/REF(C,1)>1.03 AND V/REF(MA(V,20),1)>2 AND C>O AND (C-O)/O>0.03 AND RSI.RSI1>REF(RSI.RSI1,1) AND REF(RSI.RSI1,5)<30')
-  }
-
-  return lines.length ? lines.join(' AND\n') + ';' : ''
-})
+const mobileStatement = computed(() => promptResult.value.mobileStatement)
+const manualConditions = computed(() => promptResult.value.manualConditions)
+const pcFormula = computed(() => promptResult.value.pcFormula)
 
 const f10Reminders = computed(() => {
   return mines.filter(m => !m.auto && m.checked)
