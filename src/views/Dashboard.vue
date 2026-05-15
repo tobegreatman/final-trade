@@ -410,7 +410,9 @@ function formatChange(val) {
 
 let intradayTimer = null
 let judgmentTimer = null
+let breadthTimer = null
 const JUDGMENT_INTERVAL = 6 * 60 * 1000 // 6 分钟
+const BREADTH_INTERVAL = 30 * 1000      // 30 秒
 
 function startIntradayTimer() {
   if (intradayTimer) return
@@ -422,6 +424,12 @@ function startJudgmentTimer() {
   if (judgmentTimer) return
   marketStore.fetchAll()
   judgmentTimer = setInterval(() => marketStore.fetchAll(), JUDGMENT_INTERVAL)
+}
+
+function startBreadthTimer() {
+  if (breadthTimer) return
+  marketStore.fetchBreadth()
+  breadthTimer = setInterval(() => marketStore.fetchBreadth(), BREADTH_INTERVAL)
 }
 
 function refreshJudgment() {
@@ -436,13 +444,19 @@ function stopJudgmentTimer() {
   if (judgmentTimer) { clearInterval(judgmentTimer); judgmentTimer = null }
 }
 
+function stopBreadthTimer() {
+  if (breadthTimer) { clearInterval(breadthTimer); breadthTimer = null }
+}
+
 function onVisibilityChange() {
   if (document.hidden) {
     stopIntradayTimer()
     stopJudgmentTimer()
+    stopBreadthTimer()
   } else {
     startIntradayTimer()
     startJudgmentTimer()
+    startBreadthTimer()
   }
 }
 
@@ -461,6 +475,7 @@ async function fetchIndexIntraday() {
 onMounted(async () => {
   startIntradayTimer()
   startJudgmentTimer()
+  startBreadthTimer()
   document.addEventListener('visibilitychange', onVisibilityChange)
   // Staggered reveal animations
   requestAnimationFrame(() => {
@@ -472,6 +487,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   stopIntradayTimer()
   stopJudgmentTimer()
+  stopBreadthTimer()
   document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>

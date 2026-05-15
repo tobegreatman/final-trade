@@ -168,6 +168,8 @@ cd server && node index.js   # 启动后端，配合静态文件服务使用
 
 定时刷新间隔统一在 `src/utils/constants.js` 的 `REFRESH_INTERVAL` 中配置（默认 10000ms），所有页面的定时器共用同一设置。
 
+Dashboard 涨跌家数使用独立的 30 秒刷新定时器（`BREADTH_INTERVAL`），服务端缓存也为 30 秒（`BREADTH_CACHE_TTL`），确保盘中数据实时性。其余市场数据服务端缓存 5 分钟。
+
 ## 数据查询策略
 
 - 9:00 前使用前一交易日日期参数查询（获取最新收盘数据）

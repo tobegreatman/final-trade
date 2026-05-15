@@ -18,6 +18,7 @@ import {
 
 // ==================== 常量 ====================
 const CACHE_TTL = 5 * 60 * 1000
+const BREADTH_CACHE_TTL = 30 * 1000
 const PORT = process.env.PORT || 3001
 
 const EM_HEADERS = {
@@ -67,9 +68,9 @@ function calcMA(arr, n) {
 
 // ==================== 服务端缓存 ====================
 const apiCache = new Map()
-function getCached(key) {
+function getCached(key, ttl = CACHE_TTL) {
   const entry = apiCache.get(key)
-  if (entry && Date.now() - entry.ts < CACHE_TTL) return entry.data
+  if (entry && Date.now() - entry.ts < ttl) return entry.data
   return null
 }
 function setCache(key, data) {
@@ -208,7 +209,7 @@ router.get('/api/market/indices', async (ctx) => {
 
 // --- Market Breadth (涨跌家数) ---
 router.get('/api/market/breadth', async (ctx) => {
-  const cached = getCached('breadth')
+  const cached = getCached('breadth', BREADTH_CACHE_TTL)
   if (cached) { ctx.body = ok(cached); return }
 
   // 方案 1: push2 ulist（一次请求汇总沪深京A股）
