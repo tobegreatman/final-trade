@@ -10,5 +10,14 @@ export default defineConfig({
         changeOrigin: true
       }
     }
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          echarts: ['echarts']
+        }
+      }
+    }
   }
 })

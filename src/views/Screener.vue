@@ -124,10 +124,54 @@
       <div class="output-block">
         <div class="output-header">
           <span class="output-type">手机端 · 一句话选股</span>
-          <button class="btn btn-sm btn-ghost" @click="copy(mobileStatement)">复制</button>
+          <div class="output-actions">
+            <button class="btn btn-sm btn-primary" @click="queryXuangu" :disabled="queryLoading">
+              {{ queryLoading ? '查询中...' : '查询' }}
+            </button>
+            <button class="btn btn-sm btn-ghost" @click="copy(mobileStatement)">复制</button>
+          </div>
         </div>
         <pre class="output-code">{{ mobileStatement }}</pre>
         <p class="output-hint">粘贴到东方财富 App「一句话选股」或 xuangu.eastmoney.com</p>
+      </div>
+
+      <!-- Query results -->
+      <div v-if="queryLoading" class="query-loading">
+        <span class="pulse-dot"></span> 正在查询候选股...
+      </div>
+      <template v-else-if="queryResults.length">
+        <div class="query-info">
+          匹配 {{ queryResults.length }} 只 · 点击添加自选并查看详情
+        </div>
+        <div class="stock-grid">
+          <div
+            v-for="s in queryResults"
+            :key="s.code"
+            class="stock-card"
+            @click="goToStock(s.code, s.name)"
+          >
+            <div class="stock-card__header">
+              <span class="stock-card__name">{{ s.name }}</span>
+              <span class="stock-card__code">{{ s.code }}</span>
+            </div>
+            <div class="stock-card__price">
+              <span class="stock-card__val">{{ s.price?.toFixed(2) }}</span>
+              <span class="stock-card__chg" :class="s.chgAmt >= 0 ? 'up' : 'down'">
+                {{ s.chgAmt >= 0 ? '+' : '' }}{{ s.chgAmt?.toFixed(2) }}%
+              </span>
+            </div>
+            <div class="stock-card__meta">
+              <span>PE {{ s.pe?.toFixed(1) }}</span>
+              <span>PB {{ s.pb?.toFixed(2) }}</span>
+              <span>换手 {{ s.turnover?.toFixed(1) }}%</span>
+            </div>
+          </div>
+        </div>
+        <button class="btn btn-sm btn-ghost query-refresh" @click="queryXuangu">刷新结果</button>
+      </template>
+      <div v-else-if="queryFetched && !queryResults.length" class="query-empty">
+        <span>暂无匹配结果</span>
+        <button class="btn btn-sm btn-ghost" @click="queryXuangu">重新查询</button>
       </div>
 
       <!-- Manual conditions -->
@@ -171,8 +215,13 @@
 
 <script setup>
 import { ref, reactive, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { MINE_SWEEPER_ITEMS, FUNDAMENTAL_DEFAULTS, PROSPERITY_OPTIONS, TECH_SIGNAL_OPTIONS } from '../utils/constants.js'
 import { buildScreenerPrompt } from '../utils/screenerPrompt.js'
+import { useWatchlistStore } from '../stores/watchlist.js'
+
+const router = useRouter()
+const watchlistStore = useWatchlistStore()
 
 const openLayer = ref(1)
 const mines = reactive(MINE_SWEEPER_ITEMS.map(m => ({ ...m, checked: m.auto })))
@@ -213,6 +262,39 @@ const pcFormula = computed(() => promptResult.value.pcFormula)
 const f10Reminders = computed(() => {
   return mines.filter(m => !m.auto && m.checked)
 })
+
+const queryResults = ref([])
+const queryLoading = ref(false)
+const queryFetched = ref(false)
+
+async function queryXuangu() {
+  if (!mobileStatement.value) return
+  queryLoading.value = true
+  queryFetched.value = false
+  try {
+    const res = await fetch('/api/stock/xuangu', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: mobileStatement.value })
+    })
+    const json = await res.json()
+    if (json.ok) {
+      queryResults.value = json.data.stocks || []
+    } else {
+      queryResults.value = []
+    }
+    queryFetched.value = true
+  } catch (e) {
+    console.error('queryXuangu error:', e)
+  } finally {
+    queryLoading.value = false
+  }
+}
+
+function goToStock(code, name) {
+  watchlistStore.addStock(code, name)
+  router.push({ path: '/watchlist', query: { code, name } })
+}
 
 function toggleLayer(n) {
   openLayer.value = openLayer.value === n ? 0 : n
@@ -613,5 +695,146 @@ function copy(text) {
   .fund-grid {
     grid-template-columns: 1fr;
   }
+
+  .stock-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.output-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.query-loading,
+.query-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 20px;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.query-info {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.pulse-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+.stock-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.stock-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s, transform 0.15s;
+}
+
+.stock-card:hover {
+  border-color: rgba(0, 113, 227, 0.3);
+  background: rgba(0, 113, 227, 0.04);
+  transform: translateY(-1px);
+}
+
+.stock-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.stock-card__name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+
+.stock-card__code {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.stock-card__price {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.stock-card__val {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-card__chg {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stock-card__chg.up { color: var(--red); }
+.stock-card__chg.down { color: var(--green); }
+
+.stock-card__meta {
+  display: flex;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.stock-card__meta span {
+  background: var(--bg-surface-alt, rgba(255, 255, 255, 0.03));
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.query-refresh {
+  margin-top: 4px;
 }
 </style>

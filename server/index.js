@@ -108,6 +108,24 @@ async function fetchJSON(url, timeoutMs = 8000) {
   }
 }
 
+// JRJ (金融界) 涨跌停温度计 API
+const JRJ_HEADERS = { 'Content-Type': 'application/json', 'productId': '6000021' }
+
+async function fetchJRJ(path, body = {}, timeoutMs = 8000) {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  const res = await fetch(`https://gateway.jrj.com${path}`, {
+    method: 'POST',
+    headers: JRJ_HEADERS,
+    body: JSON.stringify(body),
+    signal: ctrl.signal
+  })
+  clearTimeout(timer)
+  const json = await res.json()
+  if (json.code !== 20000) throw new Error(json.msg || 'JRJ API error')
+  return json.data
+}
+
 function diffVolume(trends) {
   for (let i = trends.length - 1; i > 0; i--) {
     if (trends[i].time.slice(0, 10) === trends[i - 1].time.slice(0, 10)) {
@@ -212,26 +230,7 @@ router.get('/api/market/breadth', async (ctx) => {
   const cached = getCached('breadth', BREADTH_CACHE_TTL)
   if (cached) { ctx.body = ok(cached); return }
 
-  // 方案 1: push2 ulist（一次请求汇总沪深京A股）
-  try {
-    const url = 'https://push2.eastmoney.com/api/qt/ulist/get?fltt=1&invt=2&fields=f104,f105,f106&secids=1.000002,0.399002,0.899050&ut=8dec03ba335b81bf4ebdf7b29ec27d15&pn=1&np=1&dect=1&pz=20'
-    const data = await fetchJSON(url, 5000)
-    const list = data.data?.diff || []
-    let up = 0, down = 0, flat = 0
-    for (const item of list) {
-      up += (item.f104 || 0)
-      down += (item.f105 || 0)
-      flat += (item.f106 || 0)
-    }
-    if (up + down + flat > 0) {
-      const result = { up, down, flat }
-      ctx.body = ok(result)
-      setCache('breadth', result)
-      return
-    }
-  } catch (e) { /* push2 不可用 */ }
-
-  // 方案 2: 新浪批量（覆盖沪深京全 A 股）
+  // 新浪批量（覆盖沪深京全 A 股，15并发约3-5秒）
   try {
     const sinaFetch = (url) => new Promise((resolve, reject) => {
       https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
@@ -240,11 +239,11 @@ router.get('/api/market/breadth', async (ctx) => {
     })
     const totalStr = await sinaFetch('https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?node=hs_a')
     const total = parseInt(totalStr) || 5500
-    const pages = Math.ceil(total / 80)
+    const pages = Math.ceil(total / 80) + 3
     let up = 0, down = 0, flat = 0
-    for (let i = 0; i < pages; i += 8) {
+    for (let i = 0; i < pages; i += 15) {
       const batch = []
-      for (let j = i; j < Math.min(i + 8, pages); j++) {
+      for (let j = i; j < Math.min(i + 15, pages); j++) {
         batch.push(sinaFetch(`https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=${j + 1}&num=80&sort=changepercent&asc=0&node=hs_a`))
       }
       const results = await Promise.all(batch)
@@ -309,6 +308,16 @@ router.get('/api/market/indices/intraday', async (ctx) => {
 })
 
 // --- Northbound (北向资金) ---
+async function fetchNorthboundStcn() {
+  const url = 'https://info.stcn.com/dc/sjb/newindex.jsp?p=xcxBszjcjetusj'
+  const res = await fetchJSON(url)
+  if (!Array.isArray(res) || !res.length) throw new Error('stcn no data')
+  // stcn returns [["2026.05.15","4353.3885"], ...] 单位：亿元，EM的NF_DEAL_AMT单位是百万元（亿×100）
+  return res.map(d => ({
+    date: d[0].replace(/\./g, '-'), nfAmt: Math.round(parseFloat(d[1]) * 100),
+    sscAmt: 0, stAmt: 0, sciRate: 0, sscRate: 0, source: 'stcn'
+  }))
+}
 router.get('/api/market/northbound', async (ctx) => {
   const cached = getCached('northbound')
   if (cached) { ctx.body = ok(cached); return }
@@ -316,11 +325,21 @@ router.get('/api/market/northbound', async (ctx) => {
     const dateStart = new Date()
     dateStart.setDate(dateStart.getDate() - 30)
     const ds = dateStart.toISOString().slice(0, 10)
-    const url = `https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_MUTUAL_DEALAMT&columns=TRADE_DATE,NF_DEAL_AMT,SSC_DEAL_AMT,ST_DEAL_AMT&filter=(TRADE_DATE%3E%3D%27${ds}%27)&sortTypes=-1&sortColumns=TRADE_DATE&source=WEB&client=WEB&pageSize=25`
-    const data = await fetchJSON(url)
-    const flows = (data.result?.data || []).map(d => ({
-      date: d.TRADE_DATE?.slice(0, 10), nfAmt: d.NF_DEAL_AMT, sscAmt: d.SSC_DEAL_AMT, stAmt: d.ST_DEAL_AMT
-    }))
+    const url = `https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_MUTUAL_DEALAMT&columns=TRADE_DATE,NF_DEAL_AMT,SSC_DEAL_AMT,ST_DEAL_AMT,SCI_INDEX_RATE,SSC_CHANGE_RATE&filter=(TRADE_DATE%3E%3D%27${ds}%27)&sortTypes=-1&sortColumns=TRADE_DATE&source=WEB&client=WEB&pageSize=25`
+    let flows
+    try {
+      const data = await fetchJSON(url)
+      flows = (data.result?.data || []).map(d => ({
+        date: d.TRADE_DATE?.slice(0, 10), nfAmt: d.NF_DEAL_AMT, sscAmt: d.SSC_DEAL_AMT, stAmt: d.ST_DEAL_AMT,
+        sciRate: d.SCI_INDEX_RATE, sscRate: d.SSC_CHANGE_RATE
+      }))
+    } catch (e1) {
+      console.log('[northbound] eastmoney failed, trying stcn:', e1.message)
+      flows = await fetchNorthboundStcn()
+    }
+    if (!flows?.length) {
+      flows = await fetchNorthboundStcn()
+    }
     ctx.body = ok(flows)
     setCache('northbound', flows)
   } catch (e) {
@@ -350,38 +369,87 @@ router.get('/api/market/margin', async (ctx) => {
 // --- Limit-up/Limit-down Stats (涨停/跌停) ---
 router.get('/api/market/limit-stats', async (ctx) => {
   try {
-    const statsUrl = 'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_CUSTOM_INTSELECTION_LIMIT&columns=LIMIT_NUMBERS,NATURAL_LIMIT,DAILY_LIMIT,TOUCH_LIMIT,SEALING_RATE,MONEYMAKING_EFFECT,NATURAL_LIMIT_YES,TRADE_DATE&source=WEB&client=WEB'
-    const fenbuUrl = 'https://push2ex.eastmoney.com/getTopicZDFenBu?ut=7eea3edcaed734bea9cbfc24409ed989&dpt=wz.ztzt'
-    const [statsData, fenbuData] = await Promise.allSettled([fetchJSON(statsUrl), fetchJSON(fenbuUrl)])
+    let result = null
 
-    let limitUp = 0, limitDown = 0, sealingRate = 0, moneyEffect = 0, date = ''
-    let naturalLimit = 0, touchLimit = 0, t1PctChange = 0
-    if (statsData.status === 'fulfilled' && statsData.value?.result?.data?.[0]) {
-      const s = statsData.value.result.data[0]
-      limitUp = s.LIMIT_NUMBERS || 0
-      sealingRate = s.SEALING_RATE || 0
-      moneyEffect = s.MONEYMAKING_EFFECT || 0
-      naturalLimit = s.NATURAL_LIMIT || 0
-      touchLimit = s.TOUCH_LIMIT || 0
-      t1PctChange = s.T1_PCTCHANGE || 0
-      date = s.TRADE_DATE?.slice(0, 10) || ''
-    }
-    if (fenbuData.status === 'fulfilled' && fenbuData.value?.data?.fenbu) {
-      let fenbuUp = 0, fenbuDown = 0
-      for (const item of fenbuData.value.data.fenbu) {
-        // 涨停：主板±10% (10/11桶) + 创业板/科创板±20% (20桶)
-        if (item['10'] != null) fenbuUp += item['10']
-        if (item['11'] != null) fenbuUp += item['11']
-        if (item['20'] != null) fenbuUp += item['20']
-        // 跌停：同理
-        if (item['-10'] != null) fenbuDown += item['-10']
-        if (item['-11'] != null) fenbuDown += item['-11']
-        if (item['-20'] != null) fenbuDown += item['-20']
+    // 优先使用 JRJ 数据源（数据更丰富：涨5%+/跌5%+、市场热度、分布桶）
+    try {
+      const emStatsUrl = 'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_CUSTOM_INTSELECTION_LIMIT&columns=LIMIT_NUMBERS,NATURAL_LIMIT,DAILY_LIMIT,TOUCH_LIMIT,SEALING_RATE,MONEYMAKING_EFFECT,NATURAL_LIMIT_YES,T1_PCTCHANGE,TRADE_DATE&source=WEB&client=WEB'
+      const [market, history, emRes] = await Promise.all([
+        fetchJRJ('/quot-dc/zdt/v1/market'),
+        fetchJRJ('/quot-dc/zdt/market_history'),
+        fetchJSON(emStatsUrl).catch(() => null)
+      ])
+      const s = market.stock || {}
+      const td = String(market.tradedate || '')
+      const dateStr = td.length === 8 ? `${td.slice(0,4)}-${td.slice(4,6)}-${td.slice(6,8)}` : ''
+      const hist = (history.list || []).slice(0, 10)
+      // 涨停以东方财富为准（EM准确），跌停以JRJ为准（EM的DAILY_LIMIT统计口径不全）
+      // JRJ 补充温度/涨5%/历史等独有字段
+      const em = emRes?.result?.data?.[0] || {}
+      result = {
+        date: dateStr || (em.TRADE_DATE?.slice(0, 10) || ''),
+        limitUp: em.LIMIT_NUMBERS || s.zt || 0,
+        limitDown: s.dt || em.DAILY_LIMIT || 0,
+        up5p: s.up5p || 0,
+        down5p: s.down5p || 0,
+        temperature: +(market.temperature || 0).toFixed(2),
+        totalStocks: s.total || 0,
+        stopped: s.stopped || 0,
+        buckets: s.buckets || [],
+        naturalLimit: em.NATURAL_LIMIT || 0,
+        touchLimit: em.TOUCH_LIMIT || 0,
+        sealingRate: em.SEALING_RATE || 0,
+        moneyEffect: em.MONEYMAKING_EFFECT || 0,
+        t1PctChange: em.T1_PCTCHANGE || 0,
+        history: hist.map(h => ({
+          date: String(h.tradeDate),
+          limitUp: h.upLimitCount,
+          limitDown: h.downLimitCount,
+          upMoM: +(h.upIncrRatio * 100).toFixed(1),
+          downMoM: +(h.downIncrRatio * 100).toFixed(1),
+          marketAmount: h.marketAmount
+        })),
+        source: 'jrj'
       }
-      if (!limitUp) limitUp = fenbuUp
-      limitDown = fenbuDown
+    } catch (e) {
+      console.error('JRJ limit-stats failed:', e.message)
     }
-    ctx.body = ok({ date, limitUp, limitDown, naturalLimit, touchLimit, sealingRate, moneyEffect, t1PctChange })
+
+    // JRJ 失败则回退到东方财富
+    if (!result) {
+      const statsUrl = 'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_CUSTOM_INTSELECTION_LIMIT&columns=LIMIT_NUMBERS,NATURAL_LIMIT,DAILY_LIMIT,TOUCH_LIMIT,SEALING_RATE,MONEYMAKING_EFFECT,NATURAL_LIMIT_YES,T1_PCTCHANGE,TRADE_DATE&source=WEB&client=WEB'
+      const fenbuUrl = 'https://push2ex.eastmoney.com/getTopicZDFenBu?ut=7eea3edcaed734bea9cbfc24409ed989&dpt=wz.ztzt'
+      const [statsData, fenbuData] = await Promise.allSettled([fetchJSON(statsUrl), fetchJSON(fenbuUrl)])
+
+      let limitUp = 0, limitDown = 0, sealingRate = 0, moneyEffect = 0, date = ''
+      let naturalLimit = 0, touchLimit = 0, t1PctChange = 0
+      if (statsData.status === 'fulfilled' && statsData.value?.result?.data?.[0]) {
+        const s = statsData.value.result.data[0]
+        limitUp = s.LIMIT_NUMBERS || 0
+        sealingRate = s.SEALING_RATE || 0
+        moneyEffect = s.MONEYMAKING_EFFECT || 0
+        naturalLimit = s.NATURAL_LIMIT || 0
+        touchLimit = s.TOUCH_LIMIT || 0
+        t1PctChange = s.T1_PCTCHANGE || 0
+        date = s.TRADE_DATE?.slice(0, 10) || ''
+      }
+      if (fenbuData.status === 'fulfilled' && fenbuData.value?.data?.fenbu) {
+        let fenbuUp = 0, fenbuDown = 0
+        for (const item of fenbuData.value.data.fenbu) {
+          if (item['10'] != null) fenbuUp += item['10']
+          if (item['11'] != null) fenbuUp += item['11']
+          if (item['20'] != null) fenbuUp += item['20']
+          if (item['-10'] != null) fenbuDown += item['-10']
+          if (item['-11'] != null) fenbuDown += item['-11']
+          if (item['-20'] != null) fenbuDown += item['-20']
+        }
+        if (!limitUp) limitUp = fenbuUp
+        limitDown = fenbuDown
+      }
+      result = { date, limitUp, limitDown, naturalLimit, touchLimit, sealingRate, moneyEffect, t1PctChange, source: 'eastmoney' }
+    }
+
+    ctx.body = ok(result)
   } catch (e) {
     ctx.body = fail(e.message)
   }
@@ -391,7 +459,9 @@ router.get('/api/market/limit-stats', async (ctx) => {
 router.get('/api/stock/:code/kline', async (ctx) => {
   try {
     const code = ctx.params.code
-    const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${toSecid(code)}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=${getTradeDate()}&lmt=120`
+    const klt = ctx.query.klt || '101'
+    const lmt = ctx.query.lmt || '120'
+    const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${toSecid(code)}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=${klt}&fqt=1&end=${getTradeDate()}&lmt=${lmt}`
     const data = await fetchJSON(url)
     const klines = (data.data?.klines || []).map(parseKline)
     const prevClose = klines.length >= 2 ? klines[klines.length - 2].close : null
@@ -679,6 +749,14 @@ router.post('/api/stock/xuangu', async (ctx) => {
     ctx.body = fail(e.message)
   }
 })
+
+// ==================== 市场分析模块 ====================
+import { registerAnalysisRoutes } from './analysis.js'
+registerAnalysisRoutes(router)
+
+// ==================== 个股分析模块 ====================
+import { registerStockAnalysisRoutes } from './stockAnalysis.js'
+registerStockAnalysisRoutes(router)
 
 // ==================== 启动 ====================
 app.use(router.routes())

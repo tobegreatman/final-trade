@@ -30,11 +30,11 @@
       <section id="ch-market" class="guide-section">
         <h2 class="ch-title"><span class="ch-icon">📊</span> 市场趋势状态</h2>
 
-        <h3 class="sub-title">六维判据</h3>
-        <p class="section-desc">系统自动采集 6 个维度数据，逐条判断牛/震/熊信号：</p>
+        <h3 class="sub-title">八维判据</h3>
+        <p class="section-desc">系统自动采集 8 个维度数据（7维技术 + 宏观因子辅助），采用加权评分机制判断牛/震/熊信号：</p>
         <table class="market-dim-table">
           <thead>
-            <tr><th>维度</th><th>数据来源</th><th>牛市信号</th><th>熊市信号</th></tr>
+            <tr><th>维度(权重)</th><th>数据来源</th><th>牛市信号</th><th>熊市信号</th></tr>
           </thead>
           <tbody>
             <tr v-for="d in marketDimensions" :key="d.name">
@@ -47,7 +47,7 @@
         </table>
 
         <h3 class="sub-title">综合判定规则</h3>
-        <p class="section-desc">根据六维信号数量综合判定市场状态，需 ≥ 3 个信号方向一致才确认（confirmed）：</p>
+        <p class="section-desc">加权评分 + 状态惯性（hysteresis）机制，跨方向切换需 |net| ≥ 2.5：</p>
         <div class="status-cards">
           <div v-for="s in marketStatusTable" :key="s.tag" class="status-card" :class="s.tag">
             <div class="status-card__name" :style="{ color: s.color }">{{ s.status }}</div>
@@ -276,26 +276,28 @@ const buyDecisionTree = [
 ]
 
 const marketDimensions = [
-  { name: 'MACD', source: '上证指数 MACD(12,26,9)', bull: '金叉+零轴上方+柱状图放大', bear: '死叉+零轴下方+柱状图放大' },
-  { name: '涨跌家数', source: '沪深两市实时涨跌统计', bull: '上涨/下跌 > 2', bear: '下跌/上涨 > 2' },
-  { name: 'RSI', source: '上证指数 RSI(14)', bull: 'RSI>60且上行 或 超卖回升', bear: 'RSI<40且下行 或 超买回落' },
-  { name: '融资余额', source: '近10日融资余额趋势', bull: '5日净增>0.5%', bear: '5日净减>0.5%' },
-  { name: '量价配合', source: '上证指数近5日量价关系', bull: '价涨量增/底部放量', bear: '缩量上涨/放量下跌/顶背离' },
-  { name: '涨跌停', source: '当日涨跌停家数+封板率', bull: '涨停>100+封板率>70%', bear: '跌停>20+涨停<20' }
+  { name: 'MACD (1.0)', source: '上证指数 MACD(12,26,9)', bull: '金叉+零轴上方+柱状图放大（背离×1.5）', bear: '死叉+零轴下方+柱状图放大（背离×1.5）' },
+  { name: '涨跌家数 (1.5)', source: '沪深京A股实时涨跌统计', bull: '涨跌比≥2（强2.25），≥1.5（牛）', bear: '涨跌比≤0.5（强2.25），<0.67（熊）' },
+  { name: 'RSI (1.0)', source: '上证指数 RSI(14)', bull: 'RSI>60且上行 或 超卖回升（背离×1.5）', bear: 'RSI<40且下行 或 超买回落（背离×1.5）' },
+  { name: '融资余额 (1.2)', source: '近10日融资余额线性回归', bull: '回归斜率>+0.3%/日', bear: '回归斜率<-0.3%/日' },
+  { name: '量价配合 (1.3)', source: '上证指数OBV趋势+背离', bull: '价涨量增/OBV底背离（强1.95）', bear: '放量下跌/OBV顶背离（强1.95）' },
+  { name: '北向资金 (1.5)', source: '近20日北向成交额均量比', bull: '5日均量/20日均量≥1.2', bear: '5日均量/20日均量≤0.8' },
+  { name: '涨跌停 (1.3)', source: '并行评分（涨跌比/跌停数/封板率等）', bull: '评分net≥2（强≥4→1.95）', bear: '评分net≤-2（强≤-4→1.95）' },
+  { name: '宏观因子 (≤1.0)', source: 'PMI/M1-M2剪刀差/CPI/GDP/社融', bull: 'PMI>50.5 + 剪刀差收窄 + GDP>5.5% + 社融>10%', bear: 'PMI<49.5 + 剪刀差扩大 + CPI<0% + 社融<8%' }
 ]
 
 const marketStatusTable = [
-  { status: '牛市', tag: 'bull', condition: '≥ 4 个牛信号', position: '80-100%', strategy: '趋势突破', color: 'var(--red)' },
-  { status: '偏多', tag: 'bull-lean', condition: '≥ 3 个牛信号', position: '50-70%', strategy: '回调买入', color: 'var(--red)' },
+  { status: '牛市', tag: 'bull', condition: 'bullW ≥ 4.5 且 net > 0', position: '80-100%', strategy: '趋势突破', color: 'var(--red)' },
+  { status: '偏多', tag: 'bull-lean', condition: 'bullW ≥ 3.0 且 net > 0', position: '50-70%', strategy: '回调买入', color: 'var(--red)' },
   { status: '震荡', tag: 'neutral', condition: '其他', position: '≤50%', strategy: '回调买入', color: 'var(--text-secondary)' },
-  { status: '偏空', tag: 'bear-lean', condition: '≥ 3 个熊信号', position: '20-40%', strategy: '仅观望', color: 'var(--green)' },
-  { status: '熊市', tag: 'bear', condition: '≥ 4 个熊信号', position: '0-20%', strategy: '空仓', color: 'var(--green)' }
+  { status: '偏空', tag: 'bear-lean', condition: 'bearW ≥ 3.0 且 net < 0', position: '20-40%', strategy: '仅观望', color: 'var(--green)' },
+  { status: '熊市', tag: 'bear', condition: 'bearW ≥ 4.5 且 net < 0', position: '0-20%', strategy: '空仓', color: 'var(--green)' }
 ]
 
 const longWindowChecks = [
   { label: '指数收盘价 > MA60', desc: '指数站上60日均线' },
   { label: 'MA60 连续 3 天拐头向上', desc: '中期趋势转强确认' },
-  { label: '涨跌比 > 2', desc: '市场广度健康' }
+  { label: '涨跌比 ≥ 1.5', desc: '市场广度偏强' }
 ]
 
 const strategies = [

@@ -87,7 +87,7 @@
 
         <!-- RIGHT: 6-Dimension Signal Table -->
         <div class="signals-panel">
-          <h2 class="panel-title">七维判据
+          <h2 class="panel-title">八维判据
             <button class="btn btn-sm btn-ghost refresh-btn" @click="refreshJudgment">刷新</button>
           </h2>
           <div class="signals-grid">
@@ -134,6 +134,213 @@
           >
             <div class="lw-cond__icon">{{ cond.pass ? '✓' : '✗' }}</div>
             <span>{{ cond.label }}</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== SECTOR FLOW + RS ROTATION ===== -->
+      <section class="sector-flow-section" v-if="analysisStore.sectors.length">
+        <h2 class="panel-title">
+          <span class="title-icon">▦</span>
+          行业资金流向 & RS轮动
+          <template v-if="analysisStore.rsAvailable && analysisStore.top5Strong.length">
+            <span class="rs-badge" :class="rotationSignalClass">{{ rotationSignalLabel }}</span>
+            <span class="rs-hint">超额收益 vs 上证指数</span>
+            <span class="rs-days">{{ analysisStore.rsDays }}日</span>
+          </template>
+        </h2>
+
+        <!-- Row 1: 涨幅TOP10 + 主力净流入TOP5 -->
+        <div class="sector-flow-grid">
+          <div class="sector-flow-group">
+            <h3 class="rs-group-title" style="color:var(--red)">涨幅 TOP5</h3>
+            <div class="sector-flow-row sector-flow-header">
+              <span class="sf-name">行业</span>
+              <span class="sf-change">涨幅</span>
+              <span class="sf-flow">主力净流入</span>
+              <span class="sf-lead">领涨股</span>
+            </div>
+            <div v-for="s in sectorTop10" :key="s.code" class="sector-flow-row">
+              <span class="sf-name">{{ s.name }}</span>
+              <span class="sf-change" :class="s.changePercent >= 0 ? 'up' : 'down'">
+                {{ s.changePercent >= 0 ? '+' : '' }}{{ s.changePercent?.toFixed(2) }}%
+              </span>
+              <span class="sf-flow" :class="s.mainFlow >= 0 ? 'up' : 'down'">
+                {{ fmtMainFlow(s.mainFlow) }}
+              </span>
+              <span class="sf-lead">{{ s.leadStock || '--' }}</span>
+            </div>
+          </div>
+          <div class="sector-flow-group" v-if="analysisStore.top5Flow.length">
+            <h3 class="rs-group-title" style="color:#f0b90b">主力净流入 TOP5</h3>
+            <div class="sector-flow-row sector-flow-header">
+              <span class="sf-name">行业</span>
+              <span class="sf-flow">净流入</span>
+              <span class="sf-change">涨幅</span>
+            </div>
+            <div v-for="s in analysisStore.top5Flow" :key="'f-'+s.code" class="sector-flow-row">
+              <span class="sf-name">{{ s.name }}</span>
+              <span class="sf-flow up">{{ fmtMainFlow(s.mainFlow) }}</span>
+              <span class="sf-change" :class="s.changePercent >= 0 ? 'up' : 'down'">
+                {{ s.changePercent >= 0 ? '+' : '' }}{{ s.changePercent?.toFixed(2) }}%
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2: RS轮动 (only when history >= 5 days) -->
+        <div class="rs-grid" v-if="analysisStore.rsAvailable && analysisStore.top5Strong.length" style="margin-top:20px">
+          <div class="rs-group">
+            <h3 class="rs-group-title" style="color:var(--red)">RS强势 TOP5</h3>
+            <div class="rs-header-row">
+              <span class="rs-name">板块</span>
+              <span class="rs-excess">5日超额</span>
+              <span class="rs-ratio">RS</span>
+              <span class="rs-trend-h">趋势</span>
+              <span class="rs-change-h">今日</span>
+            </div>
+            <div v-for="s in analysisStore.top5Strong" :key="s.code" class="rs-row">
+              <span class="rs-name" :title="s.name">{{ s.name }}</span>
+              <span class="rs-excess" :class="s.excess5d > 0 ? 'up' : s.excess5d < 0 ? 'down' : ''">
+                {{ s.excess5d != null ? (s.excess5d > 0 ? '+' : '') + s.excess5d.toFixed(1) + '%' : '--' }}
+              </span>
+              <span class="rs-ratio" :class="s.rsRatio != null && s.rsRatio > 0 ? 'up' : s.rsRatio != null && s.rsRatio < 0 ? 'down' : ''">
+                {{ s.rsRatio != null ? (s.rsRatio > 0 ? '+' : '') + s.rsRatio.toFixed(1) + 'x' : '--' }}
+              </span>
+              <span class="rs-trend" :class="s.rsTrend === 'accelerating' ? 'c-red' : s.rsTrend === 'decelerating' ? 'c-green' : 'c-muted'">
+                {{ s.rsTrend === 'accelerating' ? '▲' : s.rsTrend === 'decelerating' ? '▼' : '▶' }}
+              </span>
+              <span class="rs-change" :class="s.changePercent >= 0 ? 'up' : 'down'">
+                {{ s.changePercent >= 0 ? '+' : '' }}{{ s.changePercent?.toFixed(2) }}%
+              </span>
+            </div>
+          </div>
+          <div class="rs-group">
+            <h3 class="rs-group-title" style="color:var(--green)">RS弱势 TOP5</h3>
+            <div class="rs-header-row">
+              <span class="rs-name">板块</span>
+              <span class="rs-excess">5日超额</span>
+              <span class="rs-ratio">RS</span>
+              <span class="rs-trend-h">趋势</span>
+              <span class="rs-change-h">今日</span>
+            </div>
+            <div v-for="s in analysisStore.top5Weak" :key="s.code" class="rs-row">
+              <span class="rs-name" :title="s.name">{{ s.name }}</span>
+              <span class="rs-excess" :class="s.excess5d > 0 ? 'up' : s.excess5d < 0 ? 'down' : ''">
+                {{ s.excess5d != null ? (s.excess5d > 0 ? '+' : '') + s.excess5d.toFixed(1) + '%' : '--' }}
+              </span>
+              <span class="rs-ratio" :class="s.rsRatio != null && s.rsRatio > 0 ? 'up' : s.rsRatio != null && s.rsRatio < 0 ? 'down' : ''">
+                {{ s.rsRatio != null ? (s.rsRatio > 0 ? '+' : '') + s.rsRatio.toFixed(1) + 'x' : '--' }}
+              </span>
+              <span class="rs-trend" :class="s.rsTrend === 'accelerating' ? 'c-red' : s.rsTrend === 'decelerating' ? 'c-green' : 'c-muted'">
+                {{ s.rsTrend === 'accelerating' ? '▲' : s.rsTrend === 'decelerating' ? '▼' : '▶' }}
+              </span>
+              <span class="rs-change" :class="s.changePercent >= 0 ? 'up' : 'down'">
+                {{ s.changePercent >= 0 ? '+' : '' }}{{ s.changePercent?.toFixed(2) }}%
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== MACRO FACTORS ===== -->
+      <section class="macro-section" v-if="analysisStore.macro">
+        <h2 class="panel-title">
+          <span class="title-icon">◆</span>
+          宏观因子
+          <span class="macro-score-badge" :class="macroScoreClass">
+            {{ analysisStore.macro.macroScore > 0 ? '+' : '' }}{{ analysisStore.macro.macroScore }}分
+          </span>
+        </h2>
+        <div class="macro-grid">
+          <div class="macro-card" v-if="analysisStore.macro.pmi">
+            <div class="macro-card__header">
+              <span class="macro-card__label">PMI</span>
+              <span class="macro-card__date">{{ analysisStore.macro.pmi.date }}</span>
+            </div>
+            <div class="macro-card__value">
+              <span class="macro-card__num" :class="analysisStore.macro.pmi.makeIndex >= 50 ? 'up' : 'down'">
+                {{ analysisStore.macro.pmi.makeIndex }}
+              </span>
+              <span class="macro-card__unit">制造业</span>
+            </div>
+            <div class="macro-card__sub">
+              非制造 {{ analysisStore.macro.pmi.nmakeIndex }}
+              <span :class="analysisStore.macro.pmi.nmakeIndex >= 50 ? 'up' : 'down'">
+                {{ analysisStore.macro.pmi.nmakeIndex >= 50 ? '扩张' : '收缩' }}
+              </span>
+            </div>
+          </div>
+
+          <div class="macro-card" v-if="analysisStore.macro.m2">
+            <div class="macro-card__header">
+              <span class="macro-card__label">M2/M1</span>
+              <span class="macro-card__date">{{ analysisStore.macro.m2.date }}</span>
+            </div>
+            <div class="macro-card__value">
+              <span class="macro-card__num">M2 {{ analysisStore.macro.m2.m2Same }}%</span>
+            </div>
+            <div class="macro-card__sub">
+              M1 {{ analysisStore.macro.m2.m1Same }}%
+              <span :class="analysisStore.macro.m2.m1m2Scissors > analysisStore.macro.m2.prevScissors ? 'up' : 'down'">
+                剪刀差{{ analysisStore.macro.m2.m1m2Scissors }}%
+              </span>
+            </div>
+          </div>
+
+          <div class="macro-card" v-if="analysisStore.macro.cpi">
+            <div class="macro-card__header">
+              <span class="macro-card__label">CPI</span>
+              <span class="macro-card__date">{{ analysisStore.macro.cpi.date }}</span>
+            </div>
+            <div class="macro-card__value">
+              <span class="macro-card__num">{{ analysisStore.macro.cpi.current }}%</span>
+              <span class="macro-card__unit">同比</span>
+            </div>
+            <div class="macro-card__sub">
+              环比 {{ analysisStore.macro.cpi.sequential > 0 ? '+' : '' }}{{ analysisStore.macro.cpi.sequential }}%
+              · 累计 {{ analysisStore.macro.cpi.accumulate }}
+            </div>
+          </div>
+
+          <div class="macro-card" v-if="analysisStore.macro.gdp">
+            <div class="macro-card__header">
+              <span class="macro-card__label">GDP</span>
+              <span class="macro-card__date">{{ analysisStore.macro.gdp.date }}</span>
+            </div>
+            <div class="macro-card__value">
+              <span class="macro-card__num">{{ analysisStore.macro.gdp.gdpSame }}%</span>
+              <span class="macro-card__unit">同比</span>
+            </div>
+            <div class="macro-card__sub" v-if="analysisStore.macro.gdp.prevGdpSame != null">
+              上期 {{ analysisStore.macro.gdp.prevGdpSame }}%
+            </div>
+          </div>
+
+          <div class="macro-card" v-if="analysisStore.macro.sf">
+            <div class="macro-card__header">
+              <span class="macro-card__label">社融</span>
+              <span class="macro-card__date">{{ analysisStore.macro.sf.date }}</span>
+            </div>
+            <div class="macro-card__value">
+              <span class="macro-card__num" :class="analysisStore.macro.sf.increment > 0 ? 'up' : 'down'">
+                {{ analysisStore.macro.sf.increment }}亿
+              </span>
+              <span class="macro-card__unit">新增</span>
+            </div>
+            <div class="macro-card__sub">
+              同比增速 {{ analysisStore.macro.sf.stockYoyGrowth }}%
+              <span v-if="analysisStore.macro.sf.yoyChange != null" :class="analysisStore.macro.sf.yoyChange > 0 ? 'up' : 'down'">
+                · YoY {{ analysisStore.macro.sf.yoyChange > 0 ? '+' : '' }}{{ analysisStore.macro.sf.yoyChange }}亿
+              </span>
+            </div>
+          </div>
+        </div>
+        <div class="macro-details" v-if="analysisStore.macro.macroDetails?.length">
+          <div v-for="d in analysisStore.macro.macroDetails" :key="d.factor" class="macro-detail-row">
+            <span class="macro-detail__factor">{{ d.factor }}</span>
+            <span class="macro-detail__signal" :class="d.signal">{{ { positive: '利好', negative: '利空', neutral: '中性' }[d.signal] }}</span>
+            <span class="macro-detail__desc">{{ d.desc }}</span>
           </div>
         </div>
       </section>
@@ -250,14 +457,18 @@
 import { ref, computed, onMounted, reactive, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMarketStore } from '../stores/market.js'
+import { useMarketAnalysisStore } from '../stores/marketAnalysis.js'
 import { judgeMarket } from '../utils/marketJudge.js'
 import { PRE_TRADE_CHECKLIST, REFRESH_INTERVAL } from '../utils/constants.js'
 import { getStrategyPreset, buildScreenerPrompt } from '../utils/screenerPrompt.js'
 import { saveJson } from '../utils/storage.js'
+import { useWatchlistStore } from '../stores/watchlist.js'
 import Sparkline from '../components/Sparkline.vue'
 
 const router = useRouter()
 const marketStore = useMarketStore()
+const analysisStore = useMarketAnalysisStore()
+const watchlistStore = useWatchlistStore()
 const showSignals = ref(false)
 const showChecklist = ref(false)
 
@@ -267,7 +478,7 @@ const checkedCount = computed(() => checklist.filter(c => c.checked).length)
 
 const judgment = computed(() => {
   if (!marketStore.indices || !marketStore.breadth || !marketStore.northbound) return null
-  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound, marketStore.margin, marketStore.breadthHistory, marketStore.limitStats, marketStore.prevStatus)
+  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound, marketStore.margin, marketStore.breadthHistory, marketStore.limitStats, marketStore.prevStatus, analysisStore.macro?.macroScore)
 })
 
 // 状态惯性：判定完成后持久化状态，下次判定作为惯性参考
@@ -294,7 +505,7 @@ const strategyLabel = computed(() => activeStrategy.value === 'trend' ? '趋势�
 const screenerPrompt = computed(() => {
   const s = judgment.value?.status
   if (!s || !activeStrategy.value) return ''
-  return buildScreenerPrompt(getStrategyPreset(s)).mobileStatement
+  return buildScreenerPrompt({ ...getStrategyPreset(s), topSectors: analysisStore.top5Strong || [] }).mobileStatement
 })
 
 const customPrompt = ref('')
@@ -358,6 +569,7 @@ function fmtCap(v) {
 }
 
 function goToStock(code, name) {
+  watchlistStore.addStock(code, name)
   router.push({ path: '/watchlist', query: { code, name } })
 }
 
@@ -416,6 +628,42 @@ function signalTagClass(sig) {
   return 'tag-neutral'
 }
 
+// ===== Sector RS Rotation =====
+const rotationSignalLabel = computed(() => {
+  const map = { strengthening: '板块走强', weakening: '板块走弱', mixed: '板块分化' }
+  return map[analysisStore.rotationSignal] || '数据积累中'
+})
+
+const rotationSignalClass = computed(() => {
+  const map = { strengthening: 'rs-strengthening', weakening: 'rs-weakening', mixed: 'rs-mixed' }
+  return map[analysisStore.rotationSignal] || ''
+})
+
+// ===== Macro Factors =====
+const macroScoreClass = computed(() => {
+  const s = analysisStore.macro?.macroScore
+  if (s == null) return ''
+  if (s > 0) return 'macro-positive'
+  if (s < 0) return 'macro-negative'
+  return 'macro-neutral'
+})
+
+// ===== Sector Capital Flow =====
+const sectorTop10 = computed(() => {
+  return analysisStore.sectors
+    .slice()
+    .sort((a, b) => (b.changePercent || 0) - (a.changePercent || 0))
+    .slice(0, 5)
+})
+
+function fmtMainFlow(val) {
+  if (val == null) return '--'
+  const yi = val / 1e8
+  if (Math.abs(yi) >= 1) return (yi >= 0 ? '+' : '') + yi.toFixed(1) + '亿'
+  const wan = val / 1e4
+  return (wan >= 0 ? '+' : '') + wan.toFixed(0) + '万'
+}
+
 function formatChange(val) {
   if (val == null) return '--'
   return (val >= 0 ? '+' : '') + val.toFixed(2)
@@ -424,7 +672,7 @@ function formatChange(val) {
 let intradayTimer = null
 let judgmentTimer = null
 let breadthTimer = null
-const JUDGMENT_INTERVAL = 6 * 60 * 1000 // 6 分钟
+const JUDGMENT_INTERVAL = 1 * 60 * 1000 // 1 分钟
 const BREADTH_INTERVAL = 30 * 1000      // 30 秒
 
 function startIntradayTimer() {
@@ -489,6 +737,8 @@ onMounted(async () => {
   startIntradayTimer()
   startJudgmentTimer()
   startBreadthTimer()
+  analysisStore.fetchSectors()
+  analysisStore.fetchMacro()
   document.addEventListener('visibilitychange', onVisibilityChange)
   // Staggered reveal animations
   requestAnimationFrame(() => {
@@ -1088,6 +1338,309 @@ onBeforeUnmount(() => {
   color: var(--green);
 }
 
+/* ===== SECTOR CAPITAL FLOW ===== */
+.sector-flow-section {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+}
+.sector-flow-grid {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  gap: 20px;
+}
+.sector-flow-group {
+  min-width: 0;
+}
+.sector-flow-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.sector-flow-row:last-child { border-bottom: none; }
+.sector-flow-header {
+  color: var(--text-muted);
+  font-size: 12px;
+  border-bottom-color: var(--border);
+}
+.sf-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-change { width: 60px; text-align: right; }
+.sf-flow { width: 80px; text-align: right; }
+.sf-lead { width: 70px; text-align: right; color: var(--text-muted); font-size: 12px; }
+@media (max-width: 768px) {
+  .sector-flow-grid { grid-template-columns: 1fr; }
+}
+
+/* ===== RS BADGE (inside sector-flow-section) ===== */
+.rs-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  margin-left: 4px;
+}
+
+.rs-badge.rs-strengthening {
+  background: var(--red-dim);
+  color: var(--red);
+}
+
+.rs-badge.rs-weakening {
+  background: var(--green-dim);
+  color: var(--green);
+}
+
+.rs-badge.rs-mixed {
+  background: rgba(255, 214, 10, 0.12);
+  color: #ffd60a;
+}
+
+.rs-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.rs-days {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.rs-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.rs-group-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.rs-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.rs-header-row .rs-name,
+.rs-header-row .rs-excess,
+.rs-header-row .rs-ratio,
+.rs-header-row .rs-trend-h,
+.rs-header-row .rs-change-h {
+  font-weight: 500;
+}
+
+.rs-trend-h {
+  width: 32px;
+  text-align: center;
+  font-size: 11px;
+}
+
+.rs-change-h {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.rs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.rs-row:last-child {
+  border-bottom: none;
+}
+
+.rs-name {
+  width: 68px;
+  font-size: 13px;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rs-excess {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  width: 60px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.rs-ratio {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--accent);
+  width: 40px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.rs-trend {
+  font-size: 12px;
+  width: 32px;
+  text-align: center;
+}
+
+.rs-change {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  margin-left: auto;
+}
+
+.rs-change.up { color: var(--red); }
+.rs-change.down { color: var(--green); }
+
+.c-red { color: var(--red); }
+.c-green { color: var(--green); }
+.c-muted { color: var(--text-muted); }
+
+/* ===== MACRO FACTORS ===== */
+.macro-section {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+}
+
+.macro-score-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 10px;
+  margin-left: 8px;
+}
+
+.macro-score-badge.macro-positive {
+  background: rgba(234, 57, 67, 0.12);
+  color: var(--red);
+}
+
+.macro-score-badge.macro-negative {
+  background: rgba(39, 174, 96, 0.12);
+  color: var(--green);
+}
+
+.macro-score-badge.macro-neutral {
+  background: rgba(255, 214, 10, 0.12);
+  color: #ffd60a;
+}
+
+.macro-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.macro-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.macro-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.macro-card__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.macro-card__date {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.macro-card__value {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.macro-card__num {
+  font-size: 18px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.macro-card__unit {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.macro-card__sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.macro-details {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.macro-detail-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.macro-detail__factor {
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 80px;
+}
+
+.macro-detail__signal {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 8px;
+}
+
+.macro-detail__signal.positive {
+  background: rgba(234, 57, 67, 0.12);
+  color: var(--red);
+}
+
+.macro-detail__signal.negative {
+  background: rgba(39, 174, 96, 0.12);
+  color: var(--green);
+}
+
+.macro-detail__signal.neutral {
+  background: rgba(255, 214, 10, 0.1);
+  color: #ffd60a;
+}
+
+.macro-detail__desc {
+  color: var(--text-muted);
+}
+
 /* ===== CHECKLIST ===== */
 .checklist-section {
   background: var(--bg-surface);
@@ -1440,6 +1993,14 @@ onBeforeUnmount(() => {
 
   .lw-conditions {
     grid-template-columns: 1fr;
+  }
+
+  .rs-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .macro-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
 
   .stock-grid {

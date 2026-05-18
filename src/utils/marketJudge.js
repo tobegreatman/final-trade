@@ -1,7 +1,7 @@
 import { MARKET_STATUS } from './constants.js'
 
 /**
- * 七维大盘判定算法 v6
+ * 八维大盘判定算法 v7
  * 维度 1: MACD 状态（动量方向 + 背离检测）
  * 维度 2: 涨跌家数（市场广度 + 趋势）
  * 维度 3: RSI 状态（超买超卖 + 背离检测）
@@ -9,18 +9,18 @@ import { MARKET_STATUS } from './constants.js'
  * 维度 5: 量价配合（OBV 趋势 + 背离）
  * 维度 6: 北向资金（活跃度 + 成交额趋势方向）
  * 维度 7: 涨跌停（市场情绪 + 封板率）
+ * 维度 8: 宏观因子（PMI/M1-M2剪刀差/CPI/GDP，低权重辅助）
  *
- * v6 改进:
- * - 新增涨跌停维度（涨停/跌停/封板率/赚钱效应）
+ * v7 改进:
+ * - 新增宏观因子辅助维度（PMI/M2-M1剪刀差/CPI/GDP）
+ * - 板块RS轮动信号（相对强度 vs 上证指数基准）
  * - 状态惯性（hysteresis）防止方向跳变
- * - 北向资金增加成交额趋势方向（替代不可用的净流入数据）
- * - 清理死代码
  */
 
 // ==================== 权重配置 ====================
 const W = { macd: 1.0, breadth: 1.5, rsi: 1.0, margin: 1.2, volumePrice: 1.3, northbound: 1.5, limitStats: 1.3 }
 const W_STRONG = 1.5
-const DIM_COUNT = 7
+const CORE_DIM_COUNT = 7  // 核心技术七维（不含宏观辅助）
 
 // ==================== 格式化工具 ====================
 function fmtAmt(v) {
@@ -75,7 +75,7 @@ function calcMACD(klines) {
   const dl = deas.length - 1
   return {
     dif: difs[last], dea: deas[dl],
-    hist: hists[last], prevHist: hists[prev] || hists[last],
+    hist: hists[last], prevHist: hists[prev] ?? hists[last],
     difAboveZero: difs[last] > 0, goldenCross: difs[last] > deas[dl],
     difSeries: difs, histSeries: hists
   }
@@ -168,7 +168,7 @@ function detectDivergence(prices, indicator) {
 }
 
 // ==================== 主判定函数 ====================
-export function judgeMarket(indices, breadth, northbound, margin, breadthHistory, limitStats, prevStatus) {
+export function judgeMarket(indices, breadth, northbound, margin, breadthHistory, limitStats, prevStatus, macroScore) {
   const idx = indices.sh || {}
   const klines = idx.klines || []
   const ma = idx.ma || {}
@@ -192,6 +192,14 @@ export function judgeMarket(indices, breadth, northbound, margin, breadthHistory
   addSignal(judgeNorthbound(northbound))
   addSignal(judgeLimitStats(limitStats))
 
+  // 宏观因子修正（第8维度，低权重，作为辅助参考）
+  if (macroScore != null && macroScore !== 0) {
+    const abs = Math.abs(macroScore)
+    const dir = macroScore > 0 ? 'bull' : 'bear'
+    const desc = macroScore > 0 ? '宏观环境偏暖，支持多头' : '宏观环境偏冷，抑制做多情绪'
+    addSignal(mk('宏观因子', `${macroScore > 0 ? '+' : ''}${macroScore.toFixed(1)}分`, dir, abs * 0.5, desc))
+  }
+
   const status = determineStatus(bullW, bearW, prevStatus)
   const confirmed = bullW >= 3.5 || bearW >= 3.5
   const longWindow = checkLongWindow(quote, ma, klines, breadth)
@@ -200,7 +208,7 @@ export function judgeMarket(indices, breadth, northbound, margin, breadthHistory
     status,
     ...MARKET_STATUS[status],
     signals,
-    score: { bull: bullCnt, bear: bearCnt, neutral: DIM_COUNT - bullCnt - bearCnt, bullW: +bullW.toFixed(1), bearW: +bearW.toFixed(1) },
+    score: { bull: bullCnt, bear: bearCnt, neutral: signals.length - bullCnt - bearCnt, bullW: +bullW.toFixed(1), bearW: +bearW.toFixed(1) },
     confirmed,
     longWindow
   }
@@ -395,8 +403,9 @@ function judgeVolumePrice(klines) {
   }
 
   if (priceUp && obvUp) {
+    const volInfo = last.amount ? `成交额${fmtAmt(last.amount)}` : `成交量${fmtAmt(last.volume)}手`
     return mk('量价配合', '价涨量增', 'bull', W.volumePrice,
-      `20日OBV趋势向上，量价齐升，成交${fmtAmt(last.volume)}`)
+      `20日OBV趋势向上，量价齐升，${volInfo}`)
   }
   if (!priceUp && obvUp) {
     return mk('量价配合', '缩量吸筹', 'bull', W.volumePrice,
@@ -457,8 +466,8 @@ function judgeLimitStats(limitStats) {
   const naturalLimit = limitStats.naturalLimit || 0
   const touchLimit = limitStats.touchLimit || 0
   // sealingRate/moneyEffect 可能是 0-1 或 0-100，统一为百分比
-  const sealPct = limitStats.sealingRate > 1 ? limitStats.sealingRate : Math.round((limitStats.sealingRate || 0) * 100)
-  const moneyPct = limitStats.moneyEffect > 1 ? limitStats.moneyEffect : Math.round((limitStats.moneyEffect || 0) * 100)
+  const sealPct = limitStats.sealingRate >= 2 ? limitStats.sealingRate : Math.round((limitStats.sealingRate || 0) * 100)
+  const moneyPct = limitStats.moneyEffect >= 2 ? limitStats.moneyEffect : Math.round((limitStats.moneyEffect || 0) * 100)
   const t1Pct = limitStats.t1PctChange || 0
 
   // 涨跌停比
@@ -541,8 +550,14 @@ function determineStatus(bullW, bearW, prevStatus) {
   if (BULL.has(prevStatus) && BULL.has(raw)) return raw
   if (BEAR.has(prevStatus) && BEAR.has(raw)) return raw
 
-  // 跨方向或进出中性：需要 |net| ≥ 2.5
-  if (Math.abs(net) < 2.5) return prevStatus
+  // 跨方向反转（多↔空）：需要 |net| ≥ 1.0
+  if (BULL.has(prevStatus) && BEAR.has(raw) || BEAR.has(prevStatus) && BULL.has(raw)) {
+    if (Math.abs(net) < 1.0) return prevStatus
+    return raw
+  }
+
+  // 进出中性：需要 |net| ≥ 2.0
+  if (Math.abs(net) < 2.0) return prevStatus
 
   return raw
 }

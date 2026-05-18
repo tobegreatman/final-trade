@@ -22,6 +22,8 @@
 const navItems = [
   { path: '/', icon: '📊', label: 'Dashboard' },
   { path: '/watchlist', icon: '⭐', label: 'Watchlist' },
+  { path: '/stock-analysis', icon: '📈', label: '个股分析' },
+  { path: '/analysis', icon: '🧭', label: 'Analysis' },
   { path: '/screener', icon: '🔍', label: 'Screener' },
   { path: '/position', icon: '📐', label: 'Position' },
   { path: '/journal', icon: '📓', label: 'Journal' },

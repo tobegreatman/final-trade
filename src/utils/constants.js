@@ -1,5 +1,5 @@
 export const PRE_TRADE_CHECKLIST = [
-  '大盘状态是否适合交易？（对照六维判定 + 决策树）',
+  '大盘状态是否适合交易？（对照八维判据 + 决策树）',
   '该股是否通过排雷清单？（对照3.2）',
   '是否有明确买入信号？（对照4.1/4.2/4.3）',
   '止损位是否已设定？（ATR计算 + 条件单）',
@@ -116,7 +116,7 @@ export const FUNDAMENTAL_DEFAULTS = {
   cashflowPositive: true,
   peMin: 5,
   peMax: 40,
-  minMarketCap: 30
+  minMarketCap: 50
 }
 
 export const PROSPERITY_OPTIONS = [
