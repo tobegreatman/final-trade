@@ -10,12 +10,14 @@ const FUNDAMENTAL_CACHE_TTL = 30 * 60 * 1000  // 30分钟缓存（含实时PE/PB
 const CAPITAL_CACHE_TTL = 5 * 60 * 1000  // 5分钟缓存
 const MARGIN_CACHE_TTL = 30 * 60 * 1000  // 30分钟缓存
 const NORTHBOUND_CACHE_TTL = 60 * 60 * 1000  // 60分钟缓存（季度数据更新慢）
+const MAIN_FORCE_CACHE_TTL = 5 * 60 * 1000  // 5分钟缓存（日度资金流更新较频）
 const CACHE_MAX_SIZE = 200  // 每个缓存最多 200 条，防止内存泄漏
 
 const fundamentalCache = new Map()
 const capitalCache = new Map()
 const marginCache = new Map()
 const northboundCache = new Map()
+const mainForceCache = new Map()
 
 // 通用缓存写入：淘汰最旧条目，更新时移动到末尾
 function cacheSet(cache, key, value) {
@@ -190,30 +192,21 @@ async function getFundamentalData(code) {
     }
   }
 
-  // 从 datacenter API 补充当前 PE/PB/市值
-  let pe = null, pb = null, totalMarketCap = null
+  // 从 datacenter API 补充当前 PE/PB/市值/行业
+  let pe = null, pb = null, totalMarketCap = null, industry = ''
   try {
     const suffix = code.startsWith('6') ? 'SH' : 'SZ'
-    const valUrl = `https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_VALUEANALYSIS_DET&columns=SECUCODE,PE_TTM,PB_MRQ,TOTAL_MARKET_CAP&source=WEB&client=WEB&sortColumns=TRADE_DATE&sortTypes=-1&pageSize=1&pageNumber=1&filter=(SECUCODE="${code}.${suffix}")`
+    const valUrl = `https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_VALUEANALYSIS_DET&columns=SECUCODE,PE_TTM,PB_MRQ,TOTAL_MARKET_CAP,BOARD_NAME&source=WEB&client=WEB&sortColumns=TRADE_DATE&sortTypes=-1&pageSize=1&pageNumber=1&filter=(SECUCODE="${code}.${suffix}")`
     const valData = await fetchJSON(valUrl)
     const vd = valData.result?.data?.[0]
     if (vd) {
       pe = vd.PE_TTM ?? null
       pb = vd.PB_MRQ ?? null
       totalMarketCap = vd.TOTAL_MARKET_CAP ?? null
+      industry = vd.BOARD_NAME || ''
     }
   } catch (e) {
     console.error('valuation fetch failed for', code, e.message)
-  }
-
-  // 行业信息从个股基本面接口推断
-  let industry = ''
-  try {
-    const basicUrl = `https://push2his.eastmoney.com/api/qt/stock/get?secid=${toSecid(code)}&fields=f127&fltt=2`
-    const basicData = await fetchJSON(basicUrl)
-    industry = basicData.data?.f127 || ''
-  } catch (e) {
-    console.warn('industry fetch failed for', code, e.message)
   }
 
   // 将当前 PE/PB/市值写入最新一期
@@ -509,10 +502,87 @@ async function handleMargin(ctx) {
   }
 }
 
+// ==================== 主力资金流向（东方财富日度数据） ====================
+
+/**
+ * 获取个股主力资金流向数据（日度）
+ * 字段映射：f51=日期, f52=主力净流入, f53=小单净流入, f54=中单净流入,
+ *           f55=大单净流入, f56=超大单净流入, f57=主力净占比, f58=小单净占比,
+ *           f59=中单净占比, f60=大单净占比, f61=超大单净占比, f62=收盘价, f63=涨跌幅
+ */
+async function getMainForceFlowData(code) {
+  const secid = toSecid(code)
+  const fields1 = 'f1,f2,f3,f7'
+  const fields2 = 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65'
+  const url = `https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=0&klt=101&secid=${secid}&fields1=${fields1}&fields2=${fields2}&ut=b2884a393a59ad64002292a3e90d46a5`
+  const data = await fetchJSON(url)
+
+  const klines = data.data?.klines || []
+  if (!klines.length) return { data: [], available: false }
+
+  const items = klines.map(line => {
+    const p = line.split(',')
+    return {
+      date: p[0],
+      mainNetInflow: +p[1],       // 主力净流入（元）
+      smallNetInflow: +p[2],      // 小单净流入
+      mediumNetInflow: +p[3],     // 中单净流入
+      largeNetInflow: +p[4],      // 大单净流入
+      superLargeNetInflow: +p[5], // 超大单净流入
+      mainNetPct: +p[6],          // 主力净占比%
+      smallNetPct: +p[7],         // 小单净占比%
+      mediumNetPct: +p[8],        // 中单净占比%
+      largeNetPct: +p[9],         // 大单净占比%
+      superLargeNetPct: +p[10],   // 超大单净占比%
+      close: +p[11],              // 收盘价
+      changePct: +p[12],          // 涨跌幅%
+    }
+  })
+
+  const latest = items[items.length - 1] || null
+
+  // 近5日主力净流入汇总
+  const recent5 = items.slice(-5)
+  const mainNetSum5 = recent5.reduce((s, d) => s + d.mainNetInflow, 0)
+  const mainNetAvgPct5 = recent5.reduce((s, d) => s + d.mainNetPct, 0) / recent5.length
+
+  return {
+    available: true,
+    data: items,
+    latest,
+    summary: {
+      mainNetSum5,
+      mainNetAvgPct5: Math.round(mainNetAvgPct5 * 100) / 100,
+    }
+  }
+}
+
+async function handleMainForceFlow(ctx) {
+  try {
+    const code = validateCode(ctx)
+    if (!code) return
+
+    const cached = mainForceCache.get(code)
+    if (cached && Date.now() - cached.ts < MAIN_FORCE_CACHE_TTL) {
+      cacheTouch(mainForceCache, code)
+      ctx.body = ok(cached.data)
+      return
+    }
+
+    const result = await getMainForceFlowData(code)
+    cacheSet(mainForceCache, code, { data: result, ts: Date.now() })
+    ctx.body = ok(result)
+  } catch (e) {
+    console.error('main-force-flow error:', e.message)
+    ctx.body = fail(e.message)
+  }
+}
+
 // ==================== 路由注册 ====================
 export function registerStockAnalysisRoutes(router) {
   router.get('/api/stock-analysis/fundamental', handleFundamental)
   router.get('/api/stock-analysis/capital-flow', handleCapitalFlow)
   router.get('/api/stock-analysis/northbound', handleNorthbound)
   router.get('/api/stock-analysis/margin', handleMargin)
+  router.get('/api/stock-analysis/main-force-flow', handleMainForceFlow)
 }

@@ -105,7 +105,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, nextTick } from 'vue'
 import * as echarts from 'echarts'
 import { getPEThresholds } from '../../utils/scoring.js'
 
@@ -334,7 +334,8 @@ watch(() => props.fundamental, () => nextTick(() => {
 }), { deep: true })
 
 onMounted(() => {
-  if (trendChartRef.value) {
+  const hist = props.fundamental?.history || []
+  if (trendChartRef.value && hist.length >= 2) {
     trendChart = echarts.init(trendChartRef.value)
     renderTrendChart()
     const ro = new ResizeObserver(() => trendChart?.resize())
@@ -347,6 +348,10 @@ onBeforeUnmount(() => {
   if (trendChartRef.value?._ro) trendChartRef.value._ro.disconnect()
   trendChart?.dispose()
   trendChart = null
+})
+
+onActivated(() => {
+  nextTick(() => trendChart?.resize())
 })
 </script>
 

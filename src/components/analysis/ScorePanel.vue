@@ -69,7 +69,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, nextTick } from 'vue'
 import * as echarts from 'echarts'
 
 const props = defineProps({
@@ -183,25 +183,30 @@ function renderRadar() {
   }, true)
 }
 
-watch(() => props.scoreResult, () => {
-  nextTick(() => { renderGauge(); renderRadar() })
+let mounted = false
+
+watch(() => props.scoreResult, (val) => {
+  if (mounted && val) nextTick(() => { renderGauge(); renderRadar() })
 }, { deep: true })
 
 onMounted(() => {
-  if (gaugeRef.value) {
-    gaugeChart = echarts.init(gaugeRef.value)
-    renderGauge()
-    const ro1 = new ResizeObserver(() => gaugeChart?.resize())
-    ro1.observe(gaugeRef.value)
-    gaugeRef.value._ro = ro1
-  }
-  if (radarRef.value) {
-    radarChart = echarts.init(radarRef.value)
-    renderRadar()
-    const ro2 = new ResizeObserver(() => radarChart?.resize())
-    ro2.observe(radarRef.value)
-    radarRef.value._ro = ro2
-  }
+  nextTick(() => {
+    if (gaugeRef.value) {
+      gaugeChart = echarts.init(gaugeRef.value)
+      renderGauge()
+      const ro1 = new ResizeObserver(() => gaugeChart?.resize())
+      ro1.observe(gaugeRef.value)
+      gaugeRef.value._ro = ro1
+    }
+    if (radarRef.value) {
+      radarChart = echarts.init(radarRef.value)
+      renderRadar()
+      const ro2 = new ResizeObserver(() => radarChart?.resize())
+      ro2.observe(radarRef.value)
+      radarRef.value._ro = ro2
+    }
+    mounted = true
+  })
 })
 
 onBeforeUnmount(() => {
@@ -211,6 +216,13 @@ onBeforeUnmount(() => {
   radarChart?.dispose()
   gaugeChart = null
   radarChart = null
+})
+
+onActivated(() => {
+  nextTick(() => {
+    gaugeChart?.resize()
+    radarChart?.resize()
+  })
 })
 </script>
 

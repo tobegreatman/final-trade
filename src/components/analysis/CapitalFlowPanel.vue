@@ -15,6 +15,45 @@
       <div ref="chartRef" class="volume-chart" />
     </div>
 
+    <!-- 主力资金流向 -->
+    <div class="section">
+      <h4 class="section-title">主力资金流向 <span class="title-sub">(日度数据)</span></h4>
+      <template v-if="mfLatest">
+        <div class="margin-cards">
+          <div class="m-card">
+            <span class="m-label">今日主力</span>
+            <span class="m-value" :class="mfLatest.mainNetInflow >= 0 ? 'text-red' : 'text-green'">
+              {{ mfLatest.mainNetInflow >= 0 ? '+' : '' }}{{ fmtFlowYi(mfLatest.mainNetInflow) }}
+            </span>
+          </div>
+          <div class="m-card">
+            <span class="m-label">主力占比</span>
+            <span class="m-value" :class="mfLatest.mainNetPct >= 0 ? 'text-red' : 'text-green'">
+              {{ mfLatest.mainNetPct >= 0 ? '+' : '' }}{{ mfLatest.mainNetPct.toFixed(2) }}%
+            </span>
+          </div>
+          <div class="m-card">
+            <span class="m-label">超大单</span>
+            <span class="m-value" :class="mfLatest.superLargeNetInflow >= 0 ? 'text-red' : 'text-green'">
+              {{ mfLatest.superLargeNetInflow >= 0 ? '+' : '' }}{{ fmtFlowYi(mfLatest.superLargeNetInflow) }}
+            </span>
+          </div>
+          <div class="m-card">
+            <span class="m-label">大单</span>
+            <span class="m-value" :class="mfLatest.largeNetInflow >= 0 ? 'text-red' : 'text-green'">
+              {{ mfLatest.largeNetInflow >= 0 ? '+' : '' }}{{ fmtFlowYi(mfLatest.largeNetInflow) }}
+            </span>
+          </div>
+        </div>
+        <div v-if="mfSummary" class="trend-info" style="margin-top: 4px">
+          <span>近5日主力合计 <strong :class="mfSummary.mainNetSum5 >= 0 ? 'text-red' : 'text-green'">{{ mfSummary.mainNetSum5 >= 0 ? '+' : '' }}{{ fmtFlowYi(mfSummary.mainNetSum5) }}</strong></span>
+          <span>均占比 <strong :class="mfSummary.mainNetAvgPct5 >= 0 ? 'text-red' : 'text-green'">{{ mfSummary.mainNetAvgPct5 >= 0 ? '+' : '' }}{{ mfSummary.mainNetAvgPct5.toFixed(2) }}%</strong></span>
+        </div>
+        <div v-if="mfItems.length > 1" ref="mfChartRef" class="margin-chart" style="height: 280px" />
+      </template>
+      <div v-else class="unavailable">数据暂不可用</div>
+    </div>
+
     <!-- 北向资金 -->
     <div class="section">
       <h4 class="section-title">北向资金 <span class="title-sub">(季度数据)</span></h4>
@@ -78,21 +117,24 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, nextTick } from 'vue'
 import * as echarts from 'echarts'
 
 const props = defineProps({
   capitalFlow: { type: Object, default: null },
   marginData: { type: Object, default: null },
-  northboundData: { type: Object, default: null }
+  northboundData: { type: Object, default: null },
+  mainForceFlow: { type: Object, default: null }
 })
 
 const chartRef = ref(null)
 const marginChartRef = ref(null)
 const nbChartRef = ref(null)
+const mfChartRef = ref(null)
 let chart = null
 let marginChart = null
 let nbChart = null
+let mfChart = null
 
 const flows = computed(() => props.capitalFlow?.flows || [])
 const priceVolumeSignal = computed(() => props.capitalFlow?.priceVolumeSignal || '')
@@ -101,6 +143,9 @@ const marginLatest = computed(() => props.marginData?.available ? props.marginDa
 const marginItems = computed(() => props.marginData?.available ? (props.marginData.data || []) : [])
 const nbLatest = computed(() => props.northboundData?.available ? props.northboundData.latest : null)
 const nbItems = computed(() => props.northboundData?.available ? (props.northboundData.data || []) : [])
+const mfLatest = computed(() => props.mainForceFlow?.available ? props.mainForceFlow.latest : null)
+const mfItems = computed(() => props.mainForceFlow?.available ? (props.mainForceFlow.data || []) : [])
+const mfSummary = computed(() => props.mainForceFlow?.available ? props.mainForceFlow.summary : null)
 
 const signalClass = computed(() => {
   const s = priceVolumeSignal.value
@@ -131,6 +176,11 @@ function fmtShares(v) {
   if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿股'
   if (v >= 1e4) return (v / 1e4).toFixed(1) + '万股'
   return v.toLocaleString() + '股'
+}
+
+function fmtFlowYi(v) {
+  if (v == null) return '--'
+  return (v / 1e8).toFixed(2) + '亿'
 }
 
 function renderChart() {
@@ -221,7 +271,15 @@ function renderMarginChart() {
   }, true)
 }
 
-watch(() => props.capitalFlow, () => nextTick(renderChart), { deep: true })
+watch(() => props.capitalFlow, () => nextTick(() => {
+  if (!chart && chartRef.value && flows.value.length) {
+    chart = echarts.init(chartRef.value)
+    const ro = new ResizeObserver(() => chart?.resize())
+    ro.observe(chartRef.value)
+    chartRef.value._ro = ro
+  }
+  renderChart()
+}), { deep: true })
 watch(() => props.marginData, () => nextTick(() => {
   if (!marginLatest.value) {
     if (marginChartRef.value?._ro) marginChartRef.value._ro.disconnect()
@@ -304,28 +362,120 @@ watch(() => props.northboundData, () => nextTick(() => {
   renderNbChart()
 }), { deep: true })
 
+function renderMfChart() {
+  const data = mfItems.value.slice(-20)
+  if (!mfChart || data.length < 2) return
+
+  const dates = data.map(d => d.date)
+  const mainFlows = data.map(d => +(d.mainNetInflow / 1e8).toFixed(2))
+  const superLargeFlows = data.map(d => +(d.superLargeNetInflow / 1e8).toFixed(2))
+  const largeFlows = data.map(d => +(d.largeNetInflow / 1e8).toFixed(2))
+
+  mfChart.setOption({
+    backgroundColor: 'transparent',
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: 'rgba(30,41,59,0.95)',
+      borderColor: 'rgba(255,255,255,0.1)',
+      textStyle: { color: '#e2e8f0', fontSize: 12 },
+      formatter: (params) => {
+        if (!params?.length) return ''
+        const idx = params[0].dataIndex
+        const d = data[idx]
+        if (!d) return ''
+        let html = `<div style="margin-bottom:4px;font-weight:600">${d.date}</div>`
+        html += `<div>收盘: ${d.close}  涨跌: ${d.changePct > 0 ? '+' : ''}${d.changePct.toFixed(2)}%</div>`
+        html += `<div style="color:${d.mainNetInflow >= 0 ? '#ff453a' : '#30d158'}">主力净流入: ${fmtFlowYi(d.mainNetInflow)} (${d.mainNetPct > 0 ? '+' : ''}${d.mainNetPct.toFixed(2)}%)</div>`
+        html += `<div style="color:${d.superLargeNetInflow >= 0 ? '#ff453a' : '#30d158'}">  超大单: ${fmtFlowYi(d.superLargeNetInflow)}</div>`
+        html += `<div style="color:${d.largeNetInflow >= 0 ? '#ff453a' : '#30d158'}">  大单: ${fmtFlowYi(d.largeNetInflow)}</div>`
+        html += `<div style="color:${d.mediumNetInflow >= 0 ? '#ff453a' : '#30d158'}">  中单: ${fmtFlowYi(d.mediumNetInflow)}</div>`
+        html += `<div style="color:${d.smallNetInflow >= 0 ? '#ff453a' : '#30d158'}">  小单: ${fmtFlowYi(d.smallNetInflow)}</div>`
+        return html
+      }
+    },
+    legend: {
+      data: ['主力净流入', '超大单', '大单'],
+      textStyle: { color: '#94a3b8', fontSize: 11 },
+      top: 0,
+    },
+    grid: { left: '8%', right: '8%', top: '14%', bottom: '10%' },
+    xAxis: { type: 'category', data: dates, axisLine: { lineStyle: { color: '#475569' } }, axisLabel: { color: '#64748b', fontSize: 10, rotate: 30 } },
+    yAxis: [
+      { type: 'value', name: '亿', axisLabel: { color: '#64748b', fontSize: 10 }, splitLine: { lineStyle: { color: 'rgba(255,255,255,0.04)' } } },
+    ],
+    series: [
+      {
+        name: '主力净流入', type: 'bar', data: mainFlows,
+        itemStyle: { color: (p) => mainFlows[p.dataIndex] >= 0 ? '#ff453a' : '#30d158' },
+        barMaxWidth: 20,
+      },
+      {
+        name: '超大单', type: 'line', data: superLargeFlows,
+        symbol: 'circle', symbolSize: 4,
+        lineStyle: { width: 1.5, color: '#ff9500' },
+        itemStyle: { color: '#ff9500' },
+      },
+      {
+        name: '大单', type: 'line', data: largeFlows,
+        symbol: 'circle', symbolSize: 4,
+        lineStyle: { width: 1.5, color: '#5ac8fa', type: 'dashed' },
+        itemStyle: { color: '#5ac8fa' },
+      },
+    ],
+  }, true)
+}
+
+watch(() => props.mainForceFlow, () => nextTick(() => {
+  if (!mfLatest.value) {
+    if (mfChartRef.value?._ro) mfChartRef.value._ro.disconnect()
+    mfChart?.dispose()
+    mfChart = null
+    return
+  }
+  if (!mfChart && mfChartRef.value && mfItems.value.length > 1) {
+    mfChart = echarts.init(mfChartRef.value)
+    const ro = new ResizeObserver(() => mfChart?.resize())
+    ro.observe(mfChartRef.value)
+    mfChartRef.value._ro = ro
+  }
+  renderMfChart()
+}), { deep: true })
+
 onMounted(() => {
-  if (chartRef.value) {
+  // 延迟初始化：仅在数据可用时创建 ECharts 实例
+  if (chartRef.value && flows.value.length) {
     chart = echarts.init(chartRef.value)
     renderChart()
     const ro = new ResizeObserver(() => chart?.resize())
     ro.observe(chartRef.value)
     chartRef.value._ro = ro
   }
-  if (marginChartRef.value) {
-    marginChart = echarts.init(marginChartRef.value)
-    renderMarginChart()
-    const ro = new ResizeObserver(() => marginChart?.resize())
-    ro.observe(marginChartRef.value)
-    marginChartRef.value._ro = ro
-  }
-  if (nbChartRef.value) {
-    nbChart = echarts.init(nbChartRef.value)
-    renderNbChart()
-    const ro = new ResizeObserver(() => nbChart?.resize())
-    ro.observe(nbChartRef.value)
-    nbChartRef.value._ro = ro
-  }
+
+  // 主力资金图表（处理切 tab 时数据已就位、watcher 不触发的情况）
+  nextTick(() => {
+    if (mfChartRef.value && mfItems.value.length > 1) {
+      mfChart = echarts.init(mfChartRef.value)
+      renderMfChart()
+      const ro = new ResizeObserver(() => mfChart?.resize())
+      ro.observe(mfChartRef.value)
+      mfChartRef.value._ro = ro
+    }
+    if (nbChartRef.value && nbItems.value.length > 1) {
+      nbChart = echarts.init(nbChartRef.value)
+      renderNbChart()
+      const ro = new ResizeObserver(() => nbChart?.resize())
+      ro.observe(nbChartRef.value)
+      nbChartRef.value._ro = ro
+    }
+    if (marginChartRef.value && marginItems.value.length) {
+      marginChart = echarts.init(marginChartRef.value)
+      renderMarginChart()
+      const ro = new ResizeObserver(() => marginChart?.resize())
+      ro.observe(marginChartRef.value)
+      marginChartRef.value._ro = ro
+    }
+  })
 })
 
 onBeforeUnmount(() => {
@@ -338,6 +488,18 @@ onBeforeUnmount(() => {
   if (nbChartRef.value?._ro) nbChartRef.value._ro.disconnect()
   nbChart?.dispose()
   nbChart = null
+  if (mfChartRef.value?._ro) mfChartRef.value._ro.disconnect()
+  mfChart?.dispose()
+  mfChart = null
+})
+
+onActivated(() => {
+  nextTick(() => {
+    chart?.resize()
+    marginChart?.resize()
+    nbChart?.resize()
+    mfChart?.resize()
+  })
 })
 </script>
 

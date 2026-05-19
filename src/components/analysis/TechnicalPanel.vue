@@ -21,7 +21,7 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount, onActivated, nextTick } from 'vue'
 import * as echarts from 'echarts'
 
 const props = defineProps({
@@ -216,6 +216,10 @@ onBeforeUnmount(() => {
   if (chartRef.value?._ro) chartRef.value._ro.disconnect()
   chart?.dispose()
   chart = null
+})
+
+onActivated(() => {
+  nextTick(() => chart?.resize())
 })
 </script>
 

@@ -3,16 +3,18 @@
  * 修复: RSI Wilder平滑, 背离波峰波谷匹配, KDJ超买超卖
  */
 
-// ==================== MA 均线 ====================
+// ==================== MA 均线（滑动窗口优化） ====================
 export function calcMA(closes, periods = [5, 10, 20, 60]) {
   const result = {}
   for (const p of periods) {
-    const arr = []
-    for (let i = 0; i < closes.length; i++) {
-      if (i < p - 1) { arr.push(null); continue }
-      let sum = 0
-      for (let j = i - p + 1; j <= i; j++) sum += closes[j]
-      arr.push(sum / p)
+    const arr = new Array(closes.length).fill(null)
+    if (closes.length < p) { result[p] = arr; continue }
+    let sum = 0
+    for (let i = 0; i < p - 1; i++) sum += closes[i]
+    for (let i = p - 1; i < closes.length; i++) {
+      sum += closes[i]
+      arr[i] = sum / p
+      sum -= closes[i - p + 1]
     }
     result[p] = arr
   }
