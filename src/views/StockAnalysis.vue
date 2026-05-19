@@ -92,6 +92,7 @@
             :margin-data="marginData"
             :northbound-data="northboundData"
             :main-force-flow="mainForceFlow"
+            :shareholder-data="shareholderData"
           />
           <ScorePanel
             v-else
@@ -139,6 +140,7 @@ const capitalFlow = ref(null)
 const marginData = ref(null)
 const northboundData = ref(null)
 const mainForceFlow = ref(null)
+const shareholderData = ref(null)
 const klinePeriod = ref('101')
 let stockChangeTimer = null
 let refreshTimer = null
@@ -175,6 +177,7 @@ const dataTimestamp = ref(null)
 function injectCapitalExtras() {
   const injections = {}
   if (marginData.value?.latest) injections._marginLatest = marginData.value.latest
+  if (marginData.value?.data?.length) injections._marginData = { data: marginData.value.data }
   if (northboundData.value?.latest) {
     injections._northboundLatest = northboundData.value.latest
     injections._northboundPrev = northboundData.value.prev
@@ -182,6 +185,12 @@ function injectCapitalExtras() {
   if (mainForceFlow.value?.latest) {
     injections._mainForceLatest = mainForceFlow.value.latest
     injections._mainForceSummary = mainForceFlow.value.summary
+  }
+  if (mainForceFlow.value?.data?.length) injections._mainForceData = mainForceFlow.value.data
+  if (shareholderData.value?.latest) {
+    injections._shareholderLatest = shareholderData.value.latest
+    injections._shareholderPrev = shareholderData.value.prev
+    injections._shareholderData = shareholderData.value.data
   }
   if (Object.keys(injections).length) {
     capitalFlow.value = { ...(capitalFlow.value || {}), ...injections }
@@ -215,7 +224,7 @@ function formatTime(d) {
 const loadErrors = ref({})
 
 function setLoadErrors(results) {
-  const names = ['kline', 'fundamental', 'capitalFlow', 'margin', 'northbound', 'mainForce']
+  const names = ['kline', 'fundamental', 'capitalFlow', 'margin', 'northbound', 'mainForce', 'shareholder']
   const errs = {}
   results.forEach((r, i) => {
     if (r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.ok)) {
@@ -225,8 +234,8 @@ function setLoadErrors(results) {
   loadErrors.value = errs
 }
 
-const errorNameMap = { kline: 'K线', fundamental: '基本面', capitalFlow: '资金面', margin: '融资融券', northbound: '北向资金', mainForce: '主力资金' }
-const tabErrorMap = { technical: 'kline', fundamental: 'fundamental', capital: ['capitalFlow', 'margin', 'northbound', 'mainForce'], score: [] }
+const errorNameMap = { kline: 'K线', fundamental: '基本面', capitalFlow: '资金面', margin: '融资融券', northbound: '北向资金', mainForce: '主力资金', shareholder: '股东户数' }
+const tabErrorMap = { technical: 'kline', fundamental: 'fundamental', capital: ['capitalFlow', 'margin', 'northbound', 'mainForce', 'shareholder'], score: [] }
 
 const hasLoadErrors = computed(() => Object.keys(loadErrors.value).length > 0)
 const errorLabels = computed(() => {
@@ -262,6 +271,7 @@ async function loadAnalysis() {
     marginData.value = null
     northboundData.value = null
     mainForceFlow.value = null
+    shareholderData.value = null
     loading.value = false
     return
   }
@@ -278,22 +288,24 @@ async function loadAnalysis() {
     marginData.value = null
     northboundData.value = null
     mainForceFlow.value = null
+    shareholderData.value = null
   }
 
   try {
-    const [klineRes, fundRes, capRes, marginRes, nbRes, mfRes] = await Promise.allSettled([
+    const [klineRes, fundRes, capRes, marginRes, nbRes, mfRes, shRes] = await Promise.allSettled([
       fetch(`/api/stock/${code}/kline?klt=${klinePeriod.value}&lmt=250`).then(r => r.json()),
       fetch(`/api/stock-analysis/fundamental?code=${code}`).then(r => r.json()),
       fetch(`/api/stock-analysis/capital-flow?code=${code}`).then(r => r.json()),
       fetch(`/api/stock-analysis/margin?code=${code}`).then(r => r.json()),
       fetch(`/api/stock-analysis/northbound?code=${code}`).then(r => r.json()),
       fetch(`/api/stock-analysis/main-force-flow?code=${code}`).then(r => r.json()),
+      fetch(`/api/stock-analysis/shareholder?code=${code}`).then(r => r.json()),
     ])
 
     // 防止切股后旧数据覆盖新数据
     if (seq !== loadSeq) return
 
-    setLoadErrors([klineRes, fundRes, capRes, marginRes, nbRes, mfRes])
+    setLoadErrors([klineRes, fundRes, capRes, marginRes, nbRes, mfRes, shRes])
 
     // K 线
     if (klineRes.status === 'fulfilled' && klineRes.value.ok) {
@@ -328,7 +340,12 @@ async function loadAnalysis() {
       mainForceFlow.value = mfRes.value.data
     }
 
-    // 统一注入：将融资融券、北向、主力数据合并到 capitalFlow
+    // 股东户数
+    if (shRes.status === 'fulfilled' && shRes.value.ok) {
+      shareholderData.value = shRes.value.data
+    }
+
+    // 统一注入：将融资融券、北向、主力、股东数据合并到 capitalFlow
     injectCapitalExtras()
 
     updateScore()
@@ -376,6 +393,7 @@ function onStockChange() {
   marginData.value = null
   northboundData.value = null
   mainForceFlow.value = null
+  shareholderData.value = null
 
   clearTimeout(stockChangeTimer)
   stockChangeTimer = setTimeout(loadAnalysis, 200)

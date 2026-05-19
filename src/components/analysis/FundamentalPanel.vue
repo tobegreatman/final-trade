@@ -31,7 +31,7 @@
 
       <!-- 区块 2+3: 财务趋势 + 核心指标 一行 -->
       <div class="trend-indicators-row">
-        <div v-if="fundamental.history.length >= 2" class="section trend-section">
+        <div v-if="fundamental?.history?.length >= 2" class="section trend-section">
           <h4 class="section-title">财务趋势（近 {{ displayHistory.length }} 季度）</h4>
           <div ref="trendChartRef" class="trend-chart" />
         </div>
@@ -95,6 +95,16 @@
                   <span class="ind-label">总市值</span>
                   <span class="ind-value">{{ formatMarketCap(latest.totalMarketCap) }}</span>
                 </div>
+                <div class="ind-card">
+                  <span class="ind-label">每股现金流</span>
+                  <span class="ind-value" :class="getCashFlowClass(latest.ocfToProfitRatio)">{{ latest.ocfPerShare != null ? latest.ocfPerShare.toFixed(2) + '元' : '--' }}</span>
+                  <span class="ind-hint" :class="getCashFlowClass(latest.ocfToProfitRatio)">{{ getCashFlowHint(latest.ocfToProfitRatio) }}</span>
+                </div>
+                <div class="ind-card">
+                  <span class="ind-label">现金流/收益</span>
+                  <span class="ind-value" :class="getCashFlowClass(latest.ocfToProfitRatio)">{{ latest.ocfToProfitRatio != null ? latest.ocfToProfitRatio.toFixed(2) : '--' }}</span>
+                  <span class="ind-hint" :class="getCashFlowClass(latest.ocfToProfitRatio)">{{ getCashFlowRatioHint(latest.ocfToProfitRatio) }}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -107,7 +117,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, nextTick } from 'vue'
 import * as echarts from 'echarts'
-import { getPEThresholds } from '../../utils/scoring.js'
+import { getPEThresholds, getPBThresholds, getDebtThresholds } from '../../utils/scoring.js'
 
 const props = defineProps({
   fundamental: { type: Object, default: null }
@@ -181,52 +191,55 @@ function getPEHint(v) {
   return '高估'
 }
 
-// --- PB ---
+// --- PB（行业感知） ---
 function getPBClass(v) {
   if (v == null || v <= 0) return ''
-  if (v <= 1.5) return 'val-good'
-  if (v <= 3) return 'val-neutral'
-  if (v <= 6) return 'val-warn'
+  const t = getPBThresholds(latest.value?.industry || '')
+  if (v <= t.low) return 'val-good'
+  if (v <= t.fair) return 'val-neutral'
+  if (v <= t.high) return 'val-warn'
   return 'val-bad'
 }
 function getPBHint(v) {
   if (v == null || v <= 0) return '--'
-  if (v <= 1.5) return '低估'
-  if (v <= 3) return '合理'
-  if (v <= 6) return '偏高'
+  const t = getPBThresholds(latest.value?.industry || '')
+  if (v <= t.low) return '低估'
+  if (v <= t.fair) return '合理'
+  if (v <= t.high) return '偏高'
   return '高估'
 }
 
 // --- ROE ---
 function getRoeClass(v) {
   if (v == null) return ''
-  if (v >= 15) return 'val-good'
-  if (v >= 8) return 'val-neutral'
-  if (v >= 3) return 'val-warn'
+  if (v >= 20) return 'val-good'
+  if (v >= 12) return 'val-neutral'
+  if (v >= 6) return 'val-warn'
   return 'val-bad'
 }
 function getRoeHint(v) {
   if (v == null) return '--'
-  if (v >= 15) return '优秀'
-  if (v >= 8) return '良好'
-  if (v >= 3) return '一般'
-  return '较差'
+  if (v >= 20) return '优秀'
+  if (v >= 12) return '良好'
+  if (v >= 6) return '一般'
+  return '较弱'
 }
 
 // --- 毛利率 ---
 function getGrossClass(v) {
   if (v == null) return ''
   if (v >= 40) return 'val-good'
-  if (v >= 20) return 'val-neutral'
-  if (v >= 10) return 'val-warn'
+  if (v >= 25) return 'val-neutral'
+  if (v >= 15) return 'val-warn'
   return 'val-bad'
 }
 function getGrossHint(v) {
   if (v == null) return '--'
   if (v >= 40) return '优秀'
-  if (v >= 20) return '良好'
-  if (v >= 10) return '一般'
-  return '较低'
+  if (v >= 25) return '良好'
+  if (v >= 15) return '一般'
+  if (v >= 5) return '偏低'
+  return '很低'
 }
 
 // --- 净利率 ---
@@ -249,14 +262,14 @@ function getNetHint(v) {
 function getGrowthClass(v) {
   if (v == null) return ''
   if (v >= 20) return 'val-good'
-  if (v >= 5) return 'val-neutral'
+  if (v >= 10) return 'val-neutral'
   if (v >= 0) return 'val-warn'
   return 'val-bad'
 }
 function getGrowthHint(v) {
   if (v == null) return '--'
   if (v >= 20) return '高增长'
-  if (v >= 5) return '稳健'
+  if (v >= 10) return '稳健'
   if (v >= 0) return '放缓'
   return '下滑'
 }
@@ -264,17 +277,53 @@ function getGrowthHint(v) {
 // --- 负债率 ---
 function getDebtClass(v) {
   if (v == null) return ''
-  if (v < 40) return 'val-good'
-  if (v < 60) return 'val-neutral'
-  if (v < 75) return 'val-warn'
+  const t = getDebtThresholds(latest.value?.industry || '')
+  if (v <= t.safe) return 'val-good'
+  if (v <= t.moderate) return 'val-neutral'
+  if (v <= t.high) return 'val-warn'
   return 'val-bad'
 }
 function getDebtHint(v) {
   if (v == null) return '--'
-  if (v < 40) return '安全'
-  if (v < 60) return '适中'
-  if (v < 75) return '偏高'
+  const t = getDebtThresholds(latest.value?.industry || '')
+  if (v <= t.safe) return '安全'
+  if (v <= t.moderate) return '适中'
+  if (v <= t.high) return '偏高'
   return '高风险'
+}
+
+// --- 现金流 ---
+function formatCashFlow(v) {
+  if (v == null) return '--'
+  if (Math.abs(v) >= 1e8) return (v / 1e8).toFixed(2) + '亿'
+  if (Math.abs(v) >= 1e4) return (v / 1e4).toFixed(1) + '万'
+  return v.toLocaleString()
+}
+
+function getCashFlowClass(ratio) {
+  if (ratio == null) return ''
+  if (ratio >= 1.0) return 'val-good'
+  if (ratio >= 0.5) return 'val-neutral'
+  if (ratio >= 0) return 'val-warn'
+  return 'val-bad'
+}
+
+function getCashFlowHint(ratio) {
+  if (ratio == null) return '--'
+  if (ratio >= 1.0) return '充裕'
+  if (ratio >= 0.5) return '正常'
+  if (ratio >= 0) return '偏少'
+  return '为负，利润未转化为现金'
+}
+
+function getCashFlowRatioHint(ratio) {
+  if (ratio == null) return '--'
+  if (ratio >= 1.2) return '利润含金量高'
+  if (ratio >= 0.8) return '现金与利润匹配'
+  if (ratio >= 0.5) return '现金略少于账面利润'
+  if (ratio > 0) return '利润含金量偏低'
+  if (ratio > -1) return '经营现金流出，利润质量差'
+  return '经营现金大幅流出，需警惕'
 }
 
 function renderTrendChart() {

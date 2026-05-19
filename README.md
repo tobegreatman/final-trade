@@ -8,7 +8,7 @@
 |------|------|
 | 大盘状态 | 八维判据自动判定市场牛熊（含宏观因子），加权评分 + 状态惯性 + 行业资金流向 & RS 轮动 + 策略选股建议 + 长窗口速判 + 交易前检查清单 |
 | 股票池 | 搜索添加自选股，实时行情自动刷新，6 周期 K 线图，分时走势，基本面数据 |
-| 个股分析 | 综合评分（技术面/基本面/资金面三维度加权）+ 技术指标信号 + 估值分位 + 财务趋势 + 北向资金 + 融资融券 |
+| 个股分析 | 综合评分（技术面40/基本面42/资金面29 三维度加权）+ 技术指标信号 + 估值分位 + 财务趋势 + 主力资金 + 北向资金 + 融资融券 + 股东户数筹码趋势 |
 | 选股筛选 | 四层漏斗（排雷→基本面→景气度→技术信号），生成东方财富一句话选股条件，支持 RS 行业过滤 |
 | 仓位计算 | ATR 动态止损/仓位/盈亏比计算，持仓管理，行业集中度监控 |
 | 交易日志 | 交易全生命周期记录，平仓复盘评分，绩效统计，违规分析 |
@@ -32,7 +32,7 @@ final-trade/
 │   ├── package.json            # 后端依赖
 │   ├── index.js                # Koa API 代理（含北向资金双源容错）
 │   ├── analysis.js             # 分析引擎（宏观评分/板块RS/估值分析）
-│   ├── stockAnalysis.js        # 个股分析引擎（基本面/资金流/融资融券/北向资金）
+│   ├── stockAnalysis.js        # 个股分析引擎（基本面/资金流/主力资金/融资融券/北向资金/股东户数）
 │   └── fallback.js             # 腾讯/新浪备用数据源
 ├── src/
 │   ├── main.js
@@ -48,7 +48,7 @@ final-trade/
 │   │   ├── marketJudge.js      # 八维大盘判定算法（v7，前7维）
 │   │   ├── marketCycle.js      # 五维周期定位引擎（10阶段）
 │   │   ├── indicators.js       # 技术指标计算（MA/MACD/KDJ/RSI/BOLL + 6类信号生成）
-│   │   ├── scoring.js          # 个股评分引擎（三维度加权 + 行业感知PE阈值）
+│   │   ├── scoring.js          # 个股评分引擎（三维度加权 技术40/基本面42/资金29 + 行业感知PE/PB/负债率阈值）
 │   │   ├── position.js         # ATR 仓位/止损/盈亏比计算
 │   ├── utils/
 │   │   ├── marketJudge.js      # 八维大盘判定算法（v7，前7维）
@@ -66,7 +66,7 @@ final-trade/
 │   │   └── analysis/
 │   │       ├── TechnicalPanel.vue   # 技术面（K线图 + 指标 + 信号列表）
 │   │       ├── FundamentalPanel.vue # 基本面（PE/PB分位 + 财务趋势图 + 指标卡片）
-│   │       ├── CapitalFlowPanel.vue # 资金面（量价分析 + 北向资金 + 融资融券）
+│   │       ├── CapitalFlowPanel.vue # 资金面（量价分析 + 主力资金 + 北向资金 + 融资融券 + 股东户数）
 │   │       └── ScorePanel.vue       # 综合评分（仪表盘 + 雷达图 + 三列明细）
 │   ├── views/
 │   │   ├── Dashboard.vue       # 大盘状态 + 宏观卡片 + 行业资金流向 & RS轮动 + 策略选股建议
@@ -142,10 +142,12 @@ cd server && node index.js   # 启动后端，配合静态文件服务使用
 | GET | `/api/stock/search` | 搜索股票（代码/名称/拼音） |
 | GET | `/api/stock/screen` | 策略选股 — 备用（趋势突破/回调买入） |
 | POST | `/api/stock/xuangu` | 一句话选股 — 主用（自然语言条件，调用东方财富 xuangu API） |
-| GET | `/api/stock-analysis/fundamental` | 个股基本面（PE/PB/ROE/营收/净利/毛利率/负债率/市值/行业），30分钟缓存 |
+| GET | `/api/stock-analysis/fundamental` | 个股基本面（PE/PB/ROE/营收/净利/毛利率/负债率/每股现金流/市值/行业），30分钟缓存 |
 | GET | `/api/stock-analysis/capital-flow` | 个股资金流向（量价分析），5分钟缓存 |
+| GET | `/api/stock-analysis/main-force-flow` | 个股主力资金流向（近60日），5分钟缓存 |
 | GET | `/api/stock-analysis/margin` | 个股融资融券明细（近30天），30分钟缓存 |
 | GET | `/api/stock-analysis/northbound` | 个股北向资金持仓（近30天），60分钟缓存 |
+| GET | `/api/stock-analysis/shareholder` | 个股股东户数历史（含环比变化），60分钟缓存 |
 
 ## 核心功能
 
@@ -219,10 +221,10 @@ Dashboard 统一面板展示：
 | 维度 | 满分 | 子项 |
 |------|------|------|
 | 技术面 | 40 | MA趋势(10) + MACD(8) + KDJ(7) + RSI(7) + BOLL(4) + 量价(4) |
-| 基本面 | 30 | PE估值(8) + ROE(8) + 营收增长(5) + 净利增长(5) + 负债率(4) |
-| 资金面 | 25 | 量价趋势(10) + 融资融券(8) + 北向资金(7) |
+| 基本面 | 42 | PE估值(8) + ROE(8) + 营收增长(5) + 净利增长(5) + 负债率(4) + PB估值(4) + 现金流质量(4) + 毛利率(4) |
+| 资金面 | 29 | 量价趋势(10) + 主力资金(7) + 融资融券(5) + 北向资金(7) + 筹码趋势(0~5) |
 
-动态权重：有基本面数据时 50/30/20，无基本面时 65/15/20。PE 阈值按 17 个行业分类独立配置。技术指标信号由 `src/utils/indicators.js` 生成，包含 MA/MACD/KDJ/RSI/BOLL/量价 6 类信号检测器，支持背离检测。
+动态权重：有基本面数据时 45/30/25，无基本面时 60/15/25。PE/PB 阈值按 20 个行业分类独立配置，负债率按 7 大行业组适配。技术指标信号由 `src/utils/indicators.js` 生成，包含 MA/MACD/KDJ/RSI/BOLL/量价 6 类信号检测器，支持背离检测。
 
 ### ATR 动态仓位计算
 
@@ -251,8 +253,8 @@ Dashboard 涨跌家数使用独立的 30 秒刷新定时器（`BREADTH_INTERVAL`
 - 东方财富 push2 系列域名从服务器端不可达时，涨跌家数走东方财富 ulist API（push2.eastmoney.com，单请求获取沪A+深A+北交所涨跌平家数），个股数据走腾讯备用
 - 北向资金使用 datacenter-web RPT_MUTUAL_DEALAMT 报表（主用），失败时自动回退证券时报 stcn 数据源
 - 选股优先使用 xuangu API（`POST /api/stock/xuangu`），不可用时回退本地筛选（`GET /api/stock/screen`）
-- 个股分析数据均来自东方财富 datacenter-web API：基本面(RPT_VALUEANALYSIS_DET + ZYZBAjaxNew)、融资融券(RPTA_WEB_RZRQ_GGMX)、北向资金(RPT_MUTUAL_HOLDSTOCKNDATE_STA_NEW)
-- 服务端 LRU 缓存（Map 插入序 + 读取序更新），基本面/融资融券 30 分钟、资金流 5 分钟、北向资金 60 分钟
+- 个股分析数据均来自东方财富 datacenter-web API：基本面(RPT_VALUEANALYSIS_DET + ZYZBAjaxNew)、融资融券(RPTA_WEB_RZRQ_GGMX)、北向资金(RPT_MUTUAL_HOLDSTOCKNDATE_STA_NEW)、主力资金(个股资金流向)、股东户数(RPT_HOLDERNUM_DET)
+- 服务端 LRU 缓存（Map 插入序 + 读取序更新），基本面/融资融券 30 分钟、资金流/主力资金 5 分钟、北向资金/股东户数 60 分钟
 
 ## 配色说明
 

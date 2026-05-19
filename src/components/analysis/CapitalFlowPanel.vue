@@ -113,6 +113,37 @@
       </template>
       <div v-else class="unavailable">数据暂不可用</div>
     </div>
+
+    <!-- 股东户数 -->
+    <div class="section">
+      <h4 class="section-title">股东户数 <span class="title-sub">(季度数据)</span></h4>
+      <template v-if="shLatest">
+        <div class="margin-cards">
+          <div class="m-card">
+            <span class="m-label">股东户数</span>
+            <span class="m-value">{{ shLatest.holderCount.toLocaleString() }}</span>
+          </div>
+          <div class="m-card">
+            <span class="m-label">环比变化</span>
+            <span class="m-value" :class="shLatest.changeRatio <= 0 ? 'text-red' : 'text-green'">
+              {{ shLatest.changeRatio >= 0 ? '+' : '' }}{{ shLatest.changeRatio.toFixed(2) }}%
+            </span>
+          </div>
+          <div class="m-card" v-if="shLatest.avgHoldNum">
+            <span class="m-label">人均持股</span>
+            <span class="m-value">{{ shLatest.avgHoldNum >= 10000 ? (shLatest.avgHoldNum / 10000).toFixed(2) + '万' : shLatest.avgHoldNum.toLocaleString() }}股</span>
+          </div>
+          <div class="m-card">
+            <span class="m-label">筹码趋势</span>
+            <span class="m-value" :class="shLatest.changeRatio <= 0 ? 'text-red' : 'text-green'">
+              {{ shLatest.changeRatio <= 0 ? '集中' : '分散' }}
+            </span>
+          </div>
+        </div>
+        <div v-if="shItems.length > 1" ref="shChartRef" class="margin-chart" style="height: 200px" />
+      </template>
+      <div v-else class="unavailable">数据暂不可用</div>
+    </div>
   </div>
 </template>
 
@@ -124,17 +155,20 @@ const props = defineProps({
   capitalFlow: { type: Object, default: null },
   marginData: { type: Object, default: null },
   northboundData: { type: Object, default: null },
-  mainForceFlow: { type: Object, default: null }
+  mainForceFlow: { type: Object, default: null },
+  shareholderData: { type: Object, default: null }
 })
 
 const chartRef = ref(null)
 const marginChartRef = ref(null)
 const nbChartRef = ref(null)
 const mfChartRef = ref(null)
+const shChartRef = ref(null)
 let chart = null
 let marginChart = null
 let nbChart = null
 let mfChart = null
+let shChart = null
 
 const flows = computed(() => props.capitalFlow?.flows || [])
 const priceVolumeSignal = computed(() => props.capitalFlow?.priceVolumeSignal || '')
@@ -146,6 +180,9 @@ const nbItems = computed(() => props.northboundData?.available ? (props.northbou
 const mfLatest = computed(() => props.mainForceFlow?.available ? props.mainForceFlow.latest : null)
 const mfItems = computed(() => props.mainForceFlow?.available ? (props.mainForceFlow.data || []) : [])
 const mfSummary = computed(() => props.mainForceFlow?.available ? props.mainForceFlow.summary : null)
+const shLatest = computed(() => props.shareholderData?.available ? props.shareholderData.latest : null)
+const shPrev = computed(() => props.shareholderData?.available ? props.shareholderData.prev : null)
+const shItems = computed(() => props.shareholderData?.available ? (props.shareholderData.data || []) : [])
 
 const signalClass = computed(() => {
   const s = priceVolumeSignal.value
@@ -442,6 +479,52 @@ watch(() => props.mainForceFlow, () => nextTick(() => {
   renderMfChart()
 }), { deep: true })
 
+function renderShChart() {
+  const data = [...shItems.value].reverse()
+  if (!shChart || data.length < 2) return
+
+  const dates = data.map(d => d.date?.slice(0, 10) || '')
+  const counts = data.map(d => d.holderCount)
+  shChart.setOption({
+    backgroundColor: 'transparent',
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: 'rgba(30,41,59,0.95)',
+      borderColor: 'rgba(255,255,255,0.1)',
+      textStyle: { color: '#e2e8f0', fontSize: 12 },
+    },
+    grid: { left: '12%', right: '8%', top: '10%', bottom: '10%' },
+    xAxis: { type: 'category', data: dates, axisLine: { lineStyle: { color: '#475569' } }, axisLabel: { color: '#64748b', fontSize: 10, rotate: 30 } },
+    yAxis: { type: 'value', axisLabel: { color: '#64748b', fontSize: 10 }, splitLine: { lineStyle: { color: 'rgba(255,255,255,0.04)' } } },
+    series: [{
+      type: 'line', data: counts, symbol: 'circle', symbolSize: 6,
+      lineStyle: { width: 2, color: '#5ac8fa' },
+      itemStyle: { color: '#5ac8fa' },
+      areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+        { offset: 0, color: 'rgba(90,200,250,0.15)' },
+        { offset: 1, color: 'rgba(90,200,250,0)' },
+      ]) }
+    }],
+  }, true)
+}
+
+watch(() => props.shareholderData, () => nextTick(() => {
+  if (!shLatest.value) {
+    if (shChartRef.value?._ro) shChartRef.value._ro.disconnect()
+    shChart?.dispose()
+    shChart = null
+    return
+  }
+  if (!shChart && shChartRef.value && shItems.value.length > 1) {
+    shChart = echarts.init(shChartRef.value)
+    const ro = new ResizeObserver(() => shChart?.resize())
+    ro.observe(shChartRef.value)
+    shChartRef.value._ro = ro
+  }
+  renderShChart()
+}), { deep: true })
+
 onMounted(() => {
   // 延迟初始化：仅在数据可用时创建 ECharts 实例
   if (chartRef.value && flows.value.length) {
@@ -454,26 +537,33 @@ onMounted(() => {
 
   // 主力资金图表（处理切 tab 时数据已就位、watcher 不触发的情况）
   nextTick(() => {
-    if (mfChartRef.value && mfItems.value.length > 1) {
+    if (!mfChart && mfChartRef.value && mfItems.value.length > 1) {
       mfChart = echarts.init(mfChartRef.value)
       renderMfChart()
       const ro = new ResizeObserver(() => mfChart?.resize())
       ro.observe(mfChartRef.value)
       mfChartRef.value._ro = ro
     }
-    if (nbChartRef.value && nbItems.value.length > 1) {
+    if (!nbChart && nbChartRef.value && nbItems.value.length > 1) {
       nbChart = echarts.init(nbChartRef.value)
       renderNbChart()
       const ro = new ResizeObserver(() => nbChart?.resize())
       ro.observe(nbChartRef.value)
       nbChartRef.value._ro = ro
     }
-    if (marginChartRef.value && marginItems.value.length) {
+    if (!marginChart && marginChartRef.value && marginItems.value.length) {
       marginChart = echarts.init(marginChartRef.value)
       renderMarginChart()
       const ro = new ResizeObserver(() => marginChart?.resize())
       ro.observe(marginChartRef.value)
       marginChartRef.value._ro = ro
+    }
+    if (!shChart && shChartRef.value && shItems.value.length > 1) {
+      shChart = echarts.init(shChartRef.value)
+      renderShChart()
+      const ro = new ResizeObserver(() => shChart?.resize())
+      ro.observe(shChartRef.value)
+      shChartRef.value._ro = ro
     }
   })
 })
@@ -491,6 +581,9 @@ onBeforeUnmount(() => {
   if (mfChartRef.value?._ro) mfChartRef.value._ro.disconnect()
   mfChart?.dispose()
   mfChart = null
+  if (shChartRef.value?._ro) shChartRef.value._ro.disconnect()
+  shChart?.dispose()
+  shChart = null
 })
 
 onActivated(() => {
@@ -499,6 +592,7 @@ onActivated(() => {
     marginChart?.resize()
     nbChart?.resize()
     mfChart?.resize()
+    shChart?.resize()
   })
 })
 </script>

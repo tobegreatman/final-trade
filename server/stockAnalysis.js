@@ -11,6 +11,7 @@ const CAPITAL_CACHE_TTL = 5 * 60 * 1000  // 5分钟缓存
 const MARGIN_CACHE_TTL = 30 * 60 * 1000  // 30分钟缓存
 const NORTHBOUND_CACHE_TTL = 60 * 60 * 1000  // 60分钟缓存（季度数据更新慢）
 const MAIN_FORCE_CACHE_TTL = 5 * 60 * 1000  // 5分钟缓存（日度资金流更新较频）
+const SHAREHOLDER_CACHE_TTL = 60 * 60 * 1000  // 60分钟缓存（季度数据更新慢）
 const CACHE_MAX_SIZE = 200  // 每个缓存最多 200 条，防止内存泄漏
 
 const fundamentalCache = new Map()
@@ -18,6 +19,7 @@ const capitalCache = new Map()
 const marginCache = new Map()
 const northboundCache = new Map()
 const mainForceCache = new Map()
+const shareholderCache = new Map()
 
 // 通用缓存写入：淘汰最旧条目，更新时移动到末尾
 function cacheSet(cache, key, value) {
@@ -175,6 +177,8 @@ async function getFundamentalData(code) {
       // 每股指标
       eps: parseNum(d.EPSJB),
       bvps: parseNum(d.BPS),
+      // 现金流（每股经营现金流，用于和每股收益比较）
+      ocfPerShare: parseNum(d.MGJYXJJE),
     }
   }
 
@@ -189,6 +193,15 @@ async function getFundamentalData(code) {
   for (const item of items) {
     if (item.netMargin == null && item.revenue && item.netProfit && item.revenue !== 0) {
       item.netMargin = Math.round(item.netProfit / item.revenue * 10000) / 100
+    }
+  }
+
+  // 补充计算: 经营现金流质量 = 每股经营现金流 / 每股收益
+  for (const item of items) {
+    if (item.ocfPerShare != null && item.eps != null && item.eps > 0) {
+      item.ocfToProfitRatio = Math.round(item.ocfPerShare / item.eps * 100) / 100
+    } else {
+      item.ocfToProfitRatio = null
     }
   }
 
@@ -471,8 +484,16 @@ async function getMarginData(code) {
     totalBalance: d.RZRQYE || 0,
     close: d.SPJ || 0,
     changePct: d.ZDF || 0,
-    balanceGrowth: d.FIN_BALANCE_GR || 0,
+    balanceGrowth: 0,
   })).reverse()
+
+  // 自行计算融资余额日环比增长率（API 字段 FIN_BALANCE_GR 可能不存在）
+  for (let i = 1; i < items.length; i++) {
+    const prev = items[i - 1].rzBalance
+    if (prev > 0) {
+      items[i].balanceGrowth = Math.round((items[i].rzBalance - prev) / prev * 10000) / 100
+    }
+  }
 
   return {
     available: true,
@@ -514,7 +535,7 @@ async function getMainForceFlowData(code) {
   const secid = toSecid(code)
   const fields1 = 'f1,f2,f3,f7'
   const fields2 = 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65'
-  const url = `https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=0&klt=101&secid=${secid}&fields1=${fields1}&fields2=${fields2}&ut=b2884a393a59ad64002292a3e90d46a5`
+  const url = `https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=60&klt=101&secid=${secid}&fields1=${fields1}&fields2=${fields2}&ut=b2884a393a59ad64002292a3e90d46a5`
   const data = await fetchJSON(url)
 
   const klines = data.data?.klines || []
@@ -578,6 +599,60 @@ async function handleMainForceFlow(ctx) {
   }
 }
 
+// ==================== 股东户数数据（季度快照） ====================
+
+async function getShareholderData(code) {
+  const url = `https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_HOLDERNUM_DET&columns=END_DATE,TOTAL_A_SHARES,AVG_HOLD_NUM,TOTAL_MARKET_CAP,AVG_MARKET_CAP,HOLDER_NUM&source=WEB&client=WEB&sortColumns=END_DATE&sortTypes=-1&pageSize=50&filter=(SECURITY_CODE="${code}")`
+  const data = await fetchJSON(url)
+
+  const raw = data.result?.data || []
+  if (!raw.length) return { data: [], available: false }
+
+  const items = raw.map((d, i, arr) => {
+    const holderNum = d.HOLDER_NUM || 0
+    const prevNum = i < arr.length - 1 ? (arr[i + 1].HOLDER_NUM || 0) : 0
+    const changeRatio = prevNum > 0 ? Math.round((holderNum - prevNum) / prevNum * 10000) / 100 : 0
+    return {
+      date: d.END_DATE?.slice(0, 10) || '',
+      holderCount: holderNum,
+      changeRatio,
+      avgHoldNum: d.AVG_HOLD_NUM || 0,
+      totalAShares: d.TOTAL_A_SHARES || 0,
+    }
+  })
+
+  const latest = items[0] || null
+  const prev = items.length >= 2 ? items[1] : null
+
+  return {
+    available: true,
+    data: items,
+    latest,
+    prev,
+  }
+}
+
+async function handleShareholder(ctx) {
+  try {
+    const code = validateCode(ctx)
+    if (!code) return
+
+    const cached = shareholderCache.get(code)
+    if (cached && Date.now() - cached.ts < SHAREHOLDER_CACHE_TTL) {
+      cacheTouch(shareholderCache, code)
+      ctx.body = ok(cached.data)
+      return
+    }
+
+    const result = await getShareholderData(code)
+    cacheSet(shareholderCache, code, { data: result, ts: Date.now() })
+    ctx.body = ok(result)
+  } catch (e) {
+    console.error('shareholder error:', e.message)
+    ctx.body = fail(e.message)
+  }
+}
+
 // ==================== 路由注册 ====================
 export function registerStockAnalysisRoutes(router) {
   router.get('/api/stock-analysis/fundamental', handleFundamental)
@@ -585,4 +660,5 @@ export function registerStockAnalysisRoutes(router) {
   router.get('/api/stock-analysis/northbound', handleNorthbound)
   router.get('/api/stock-analysis/margin', handleMargin)
   router.get('/api/stock-analysis/main-force-flow', handleMainForceFlow)
+  router.get('/api/stock-analysis/shareholder', handleShareholder)
 }

@@ -27,6 +27,41 @@ const PE_THRESHOLDS = {
   agriculture: { low: 12, fair: 25, high: 40 },
 }
 
+// ==================== 行业 PB 分档 ====================
+const PB_THRESHOLDS = {
+  default: { low: 1.5, fair: 3.0, high: 6.0 },
+  bank: { low: 0.8, fair: 1.2, high: 2.0 },
+  insurance: { low: 1.0, fair: 2.0, high: 3.5 },
+  realestate: { low: 0.5, fair: 1.0, high: 2.0 },
+  steel: { low: 0.6, fair: 1.2, high: 2.0 },
+  coal: { low: 0.8, fair: 1.5, high: 2.5 },
+  food: { low: 2.0, fair: 5.0, high: 10.0 },
+  medicine: { low: 2.0, fair: 4.0, high: 7.0 },
+  tech: { low: 2.0, fair: 4.0, high: 8.0 },
+  semiconductor: { low: 3.0, fair: 6.0, high: 10.0 },
+  military: { low: 2.0, fair: 4.0, high: 7.0 },
+  newenergy: { low: 1.5, fair: 3.0, high: 6.0 },
+  appliance: { low: 1.5, fair: 3.0, high: 5.0 },
+  auto: { low: 1.0, fair: 2.5, high: 4.0 },
+  utility: { low: 1.0, fair: 2.0, high: 3.0 },
+  chemical: { low: 1.0, fair: 2.5, high: 4.5 },
+  construction: { low: 0.6, fair: 1.2, high: 2.0 },
+  broker: { low: 1.0, fair: 1.8, high: 3.0 },
+  mining: { low: 1.0, fair: 2.5, high: 4.5 },
+  agriculture: { low: 1.0, fair: 2.5, high: 4.5 },
+}
+
+// ==================== 行业负债率分档 ====================
+const DEBT_THRESHOLDS = {
+  default: { safe: 40, moderate: 60, high: 75 },
+  bank: { safe: 85, moderate: 92, high: 97 },
+  insurance: { safe: 80, moderate: 90, high: 95 },
+  realestate: { safe: 60, moderate: 75, high: 85 },
+  broker: { safe: 70, moderate: 80, high: 90 },
+  utility: { safe: 55, moderate: 70, high: 80 },
+  construction: { safe: 55, moderate: 70, high: 80 },
+}
+
 /**
  * 计算个股综合评分
  * @param {Array} techSignals - 技术信号数组（来自 indicators.js）
@@ -38,8 +73,8 @@ const PE_THRESHOLDS = {
 export function calculateScore(techSignals = [], fundamental = null, capitalFlow = null, industry = '') {
   const dimensions = {
     technical: { score: 0, max: 40, items: [] },
-    fundamental: { score: 0, max: 30, items: [] },
-    capital: { score: 0, max: 25, items: [] }
+    fundamental: { score: 0, max: 42, items: [] },
+    capital: { score: 0, max: 29, items: [] }
   }
 
   // ========== 技术面评分 (0-40) ==========
@@ -117,7 +152,7 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   const bollSignals = techSignals.filter(s => s.source === 'BOLL')
   const bollPosition = bollSignals.find(s => !s.text.includes('收口'))
   const bollSqueeze = bollSignals.find(s => s.text.includes('收口'))
-  let bollScore = 2
+  let bollScore = 3
   let bollDesc = '中轨附近'
   if (bollPosition?.text?.includes('上轨')) {
     bollScore = 1; bollDesc = '触及上轨（超买预警）'
@@ -154,7 +189,7 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
 
   tech.score = tech.items.reduce((s, i) => s + i.score, 0)
 
-  // ========== 基本面评分 (0-30) ==========
+  // ========== 基本面评分 (0-42) ==========
   const fund = dimensions.fundamental
   const latest = fundamental?.latest
 
@@ -165,6 +200,9 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     revenue: { score: 1, max: 5 },
     profit: { score: 1, max: 5 },
     debt: { score: 1, max: 4 },
+    PB: { score: 1, max: 4 },
+    cashflow: { score: 1, max: 4 },
+    grossMargin: { score: 1, max: 4 },
   }
 
   if (latest) {
@@ -241,19 +279,79 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
       fund.items.push({ name: '净利增长', ...FUND_MISSING.profit, desc: '暂无数据' })
     }
 
-    // 5. 负债率 (0-4) — 用 <= 保持边界一致
+    // 5. 负债率（行业感知）(0-4)
     if (latest.debtRatio != null) {
-      if (latest.debtRatio <= 30) {
-        fund.items.push({ name: '负债率', score: 4, max: 4, desc: `负债率 ${latest.debtRatio.toFixed(1)}%，很低` })
-      } else if (latest.debtRatio <= 50) {
-        fund.items.push({ name: '负债率', score: 3, max: 4, desc: `负债率 ${latest.debtRatio.toFixed(1)}%，健康` })
-      } else if (latest.debtRatio <= 70) {
-        fund.items.push({ name: '负债率', score: 2, max: 4, desc: `负债率 ${latest.debtRatio.toFixed(1)}%，中等` })
+      const dt = getDebtThresholds(industry || latest.industry || '')
+      const dr = latest.debtRatio
+      if (dr <= dt.safe) {
+        fund.items.push({ name: '负债率', score: 4, max: 4, desc: `负债率 ${dr.toFixed(1)}%，安全` })
+      } else if (dr <= dt.moderate) {
+        fund.items.push({ name: '负债率', score: 3, max: 4, desc: `负债率 ${dr.toFixed(1)}%，适中` })
+      } else if (dr <= dt.high) {
+        fund.items.push({ name: '负债率', score: 1, max: 4, desc: `负债率 ${dr.toFixed(1)}%，偏高` })
       } else {
-        fund.items.push({ name: '负债率', score: 0, max: 4, desc: `负债率 ${latest.debtRatio.toFixed(1)}%，偏高` })
+        fund.items.push({ name: '负债率', score: 0, max: 4, desc: `负债率 ${dr.toFixed(1)}%，高风险` })
       }
     } else {
       fund.items.push({ name: '负债率', ...FUND_MISSING.debt, desc: '暂无数据' })
+    }
+
+    // 6. PB 估值 (0-4) — 行业感知
+    if (latest.pb != null) {
+      const t = getPBThresholds(industry || latest.industry || '')
+      const pb = latest.pb
+      if (pb <= 0) {
+        fund.items.push({ name: 'PB估值', score: 0, max: 4, desc: `PB ${pb.toFixed(1)}，破净异常` })
+      } else if (pb <= t.low) {
+        fund.items.push({ name: 'PB估值', score: 4, max: 4, desc: `PB ${pb.toFixed(1)}，低估` })
+      } else if (pb <= t.fair) {
+        fund.items.push({ name: 'PB估值', score: 3, max: 4, desc: `PB ${pb.toFixed(1)}，合理` })
+      } else if (pb <= t.high) {
+        fund.items.push({ name: 'PB估值', score: 1, max: 4, desc: `PB ${pb.toFixed(1)}，偏高` })
+      } else {
+        fund.items.push({ name: 'PB估值', score: 0, max: 4, desc: `PB ${pb.toFixed(1)}，高估` })
+      }
+    } else {
+      fund.items.push({ name: 'PB估值', ...FUND_MISSING.PB, desc: '暂无数据' })
+    }
+
+    // 7. 现金流质量 (0-4) — 每股经营现金流/每股收益
+    if (latest.ocfToProfitRatio != null) {
+      const ratio = latest.ocfToProfitRatio
+      const r = ratio.toFixed(2)
+      if (ratio >= 1.2) {
+        fund.items.push({ name: '现金流质量', score: 4, max: 4, desc: `${r}，利润含金量高` })
+      } else if (ratio >= 0.8) {
+        fund.items.push({ name: '现金流质量', score: 3, max: 4, desc: `${r}，现金与利润匹配良好` })
+      } else if (ratio >= 0.5) {
+        fund.items.push({ name: '现金流质量', score: 2, max: 4, desc: `${r}，现金略少于账面利润` })
+      } else if (ratio > 0) {
+        fund.items.push({ name: '现金流质量', score: 2, max: 4, desc: `${r}，利润含金量偏低` })
+      } else if (ratio > -1) {
+        fund.items.push({ name: '现金流质量', score: 1, max: 4, desc: `${r}，经营现金流出，利润质量差` })
+      } else {
+        fund.items.push({ name: '现金流质量', score: 0, max: 4, desc: `${r}，经营现金大幅流出，需警惕` })
+      }
+    } else {
+      fund.items.push({ name: '现金流质量', ...FUND_MISSING.cashflow, desc: '暂无数据' })
+    }
+
+    // 8. 毛利率 (0-4) — 反映真实竞争力
+    if (latest.grossMargin != null) {
+      const gm = latest.grossMargin
+      if (gm >= 40) {
+        fund.items.push({ name: '毛利率', score: 4, max: 4, desc: `毛利率 ${gm.toFixed(1)}%，优秀` })
+      } else if (gm >= 25) {
+        fund.items.push({ name: '毛利率', score: 3, max: 4, desc: `毛利率 ${gm.toFixed(1)}%，良好` })
+      } else if (gm >= 15) {
+        fund.items.push({ name: '毛利率', score: 2, max: 4, desc: `毛利率 ${gm.toFixed(1)}%，一般` })
+      } else if (gm >= 5) {
+        fund.items.push({ name: '毛利率', score: 1, max: 4, desc: `毛利率 ${gm.toFixed(1)}%，偏低` })
+      } else {
+        fund.items.push({ name: '毛利率', score: 0, max: 4, desc: `毛利率 ${gm.toFixed(1)}%，很低` })
+      }
+    } else {
+      fund.items.push({ name: '毛利率', ...FUND_MISSING.grossMargin, desc: '暂无数据' })
     }
   } else {
     // 整体无数据，使用保守默认分
@@ -262,15 +360,18 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
       { name: 'ROE', ...FUND_MISSING.ROE, desc: '暂无数据' },
       { name: '营收增长', ...FUND_MISSING.revenue, desc: '暂无数据' },
       { name: '净利增长', ...FUND_MISSING.profit, desc: '暂无数据' },
-      { name: '负债率', ...FUND_MISSING.debt, desc: '暂无数据' }
+      { name: '负债率', ...FUND_MISSING.debt, desc: '暂无数据' },
+      { name: 'PB估值', ...FUND_MISSING.PB, desc: '暂无数据' },
+      { name: '现金流质量', ...FUND_MISSING.cashflow, desc: '暂无数据' },
+      { name: '毛利率', ...FUND_MISSING.grossMargin, desc: '暂无数据' },
     )
   }
 
   fund.score = fund.items.reduce((s, i) => s + i.score, 0)
 
-  // ========== 资金面评分 (0-25) ==========
+  // ========== 资金面评分 (0-29) ==========
   const cap = dimensions.capital
-  cap.max = 25
+  cap.max = 29
   const priceVolumeSignal = capitalFlow?.priceVolumeSignal
 
   // 量价趋势评分 (0-5) — K线派生数据，权重低于真实资金流
@@ -292,9 +393,10 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     let mfScore = 3
     let mfDesc = '主力进出持平'
     // 综合今日主力净占比 + 近5日趋势判断
-    const todayPct = mfLatest.mainNetPct
+    const todayPct = mfLatest.mainNetPct ?? 0
     const avg5Pct = mfSummary?.mainNetAvgPct5 ?? 0
-    const combinedPct = todayPct * 0.4 + avg5Pct * 0.6
+    let combinedPct = todayPct * 0.4 + avg5Pct * 0.6
+    if (isNaN(combinedPct)) combinedPct = 0
     if (combinedPct > 5) { mfScore = 8; mfDesc = '主力持续大幅流入' }
     else if (combinedPct > 2) { mfScore = 6; mfDesc = '主力流入' }
     else if (combinedPct > 0) { mfScore = 4; mfDesc = '主力微幅流入' }
@@ -302,26 +404,76 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     else if (combinedPct >= -2) { mfScore = 2; mfDesc = '主力微幅流出' }
     else if (combinedPct >= -5) { mfScore = 1; mfDesc = '主力流出' }
     else { mfScore = 0; mfDesc = '主力大幅流出' }
+
+    // 主力资金10日趋势加成
+    const mfData = capitalFlow?._mainForceData
+    if (mfData && mfData.length >= 10) {
+      const recent5Avg = mfData.slice(-5).reduce((s, d) => s + (d.mainNetInflow || 0), 0) / 5
+      const prev5Avg = mfData.slice(-10, -5).reduce((s, d) => s + (d.mainNetInflow || 0), 0) / 5
+      if (recent5Avg > prev5Avg) {
+        mfScore = Math.min(8, mfScore + 1)
+        mfDesc += '，趋势上升'
+      } else if (recent5Avg < prev5Avg) {
+        mfScore = Math.max(0, mfScore - 1)
+        mfDesc += '，趋势减弱'
+      }
+    }
+
     cap.items.push({ name: '主力资金', score: mfScore, max: 8, desc: mfDesc })
   } else {
     cap.items.push({ name: '主力资金', score: 2, max: 8, desc: '暂无数据' })
   }
 
-  // 融资融券评分（基于余额变化率）(0-6)
+  // 融资融券评分（多维度：余额趋势60% + 净买入40%）(0-6)
   const marginLatest = capitalFlow?._marginLatest
   if (marginLatest?.balanceGrowth != null) {
-    let marginScore = 3
     let marginDesc = '融资余额持平'
+
+    // 维度1：余额变化方向 (权重60%, 范围0-5)
     const g = marginLatest.balanceGrowth
-    if (g >= 2) { marginScore = 6; marginDesc = '融资余额上升' }
-    else if (g > 0) { marginScore = 5; marginDesc = '融资余额微升' }
-    else if (g === 0) { marginScore = 3; marginDesc = '融资余额持平' }
-    else if (g > -2) { marginScore = 2; marginDesc = '融资余额微降' }
-    else if (g >= -5) { marginScore = 1; marginDesc = '融资余额下降' }
-    else { marginScore = 0; marginDesc = '融资余额大幅下降' }
-    cap.items.push({ name: '融资融券', score: marginScore, max: 6, desc: marginDesc })
+    let growthPart = 2.5
+    if (g >= 5) { growthPart = 5; marginDesc = '融资余额大幅上升' }
+    else if (g >= 2) { growthPart = 4; marginDesc = '融资余额上升' }
+    else if (g > 0) { growthPart = 3; marginDesc = '融资余额微升' }
+    else if (g === 0) { growthPart = 2.5; marginDesc = '融资余额持平' }
+    else if (g > -2) { growthPart = 1.5; marginDesc = '融资余额微降' }
+    else if (g > -5) { growthPart = 0.5; marginDesc = '融资余额下降' }
+    else { growthPart = 0; marginDesc = '融资余额大幅下降' }
+
+    // 维度2：净买入金额占余额比 (权重40%, 范围0-5)
+    let buyPart = 2.5
+    if (marginLatest.rzNetBuy != null && marginLatest.rzBalance > 0) {
+      const buyRatio = marginLatest.rzNetBuy / marginLatest.rzBalance * 100
+      if (buyRatio >= 1) buyPart = 5
+      else if (buyRatio >= 0.3) buyPart = 4
+      else if (buyRatio >= -0.3) buyPart = 3
+      else if (buyRatio >= -1) buyPart = 1.5
+      else buyPart = 0
+    }
+
+    let marginScore = Math.round(growthPart * 0.6 + buyPart * 0.4)
+    marginScore = Math.max(0, Math.min(6, marginScore))
+
+    // 做空信号检测：融券余额日环比（过滤小额基数误报）
+    const marginHistory = capitalFlow?._marginData?.data
+    if (marginHistory && marginHistory.length >= 2) {
+      const rqLatest = marginHistory[marginHistory.length - 1]?.rqBalance || 0
+      const rqPrev = marginHistory[marginHistory.length - 2]?.rqBalance || 0
+      if (rqPrev > 100000) {
+        const rqGrowth = (rqLatest - rqPrev) / rqPrev * 100
+        if (rqGrowth > 20) {
+          marginScore = Math.max(0, marginScore - 2)
+          marginDesc += '（融券大幅增加）'
+        } else if (rqGrowth > 10) {
+          marginScore = Math.max(0, marginScore - 1)
+          marginDesc += '（融券增加）'
+        }
+      }
+    }
+
+    cap.items.push({ name: '融资融券', score: marginScore, max: 5, desc: marginDesc })
   } else {
-    cap.items.push({ name: '融资融券', score: 2, max: 6, desc: '暂无数据' })
+    cap.items.push({ name: '融资融券', score: 2, max: 5, desc: '暂无数据' })
   }
 
   // 北向资金评分（基于季度持股变动）(0-6)
@@ -340,6 +492,40 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     cap.items.push({ name: '北向资金', score: nbScore, max: 6, desc: nbDesc })
   } else {
     cap.items.push({ name: '北向资金', score: 2, max: 6, desc: '暂无数据' })
+  }
+
+  // 筹码趋势评分（股东户数变化）(0-5) — 股东减少=集中=看多
+  const shLatest = capitalFlow?._shareholderLatest
+  if (shLatest?.changeRatio != null) {
+    let shScore = 3
+    let shDesc = '筹码稳定'
+    const cr = shLatest.changeRatio
+    if (cr <= -10) { shScore = 5; shDesc = '筹码高度集中' }
+    else if (cr <= -5) { shScore = 4; shDesc = '筹码趋于集中' }
+    else if (cr <= 0) { shScore = 3; shDesc = '筹码稳定' }
+    else if (cr <= 5) { shScore = 2; shDesc = '筹码略分散' }
+    else if (cr <= 10) { shScore = 1; shDesc = '筹码分散' }
+    else { shScore = 0; shDesc = '筹码高度分散' }
+
+    // 近3期趋势修正：连续集中加分，连续分散减分
+    const shData = capitalFlow?._shareholderData
+    if (shData && shData.length >= 3) {
+      const recent3 = shData.slice(0, 3)
+      // 趋势：连续3期集中(-1) 或 连续3期分散(+1) 或 混合(0)
+      const allConcentrating = recent3.every(d => d.changeRatio < 0)
+      const allDispersing = recent3.every(d => d.changeRatio > 0)
+      if (allConcentrating) {
+        shScore = Math.min(5, shScore + 1)
+        shDesc += '，连续集中'
+      } else if (allDispersing) {
+        shScore = Math.max(0, shScore - 1)
+        shDesc += '，连续分散'
+      }
+    }
+
+    cap.items.push({ name: '筹码趋势', score: shScore, max: 5, desc: shDesc })
+  } else {
+    cap.items.push({ name: '筹码趋势', score: 2, max: 5, desc: '暂无数据' })
   }
 
   cap.score = cap.items.reduce((s, i) => s + i.score, 0)
@@ -453,6 +639,59 @@ export function getPEThresholds(industry) {
   return PE_THRESHOLDS.default
 }
 
+// PB 行业分档辅助
+export function getPBThresholds(industry) {
+  if (!industry) return PB_THRESHOLDS.default
+  const lower = industry.toLowerCase()
+  for (const [key, thresholds] of Object.entries(PB_THRESHOLDS)) {
+    if (key === 'default') continue
+    if (lower.includes(key)) return thresholds
+  }
+  const cnMap = {
+    '银行': 'bank', '保险': 'insurance', '房地产': 'realestate',
+    '钢铁': 'steel', '煤炭': 'coal', '食品': 'food', '饮料': 'food',
+    '白酒': 'food', '酒': 'food',
+    '医药': 'medicine', '生物': 'medicine',
+    '计算机': 'tech', '电子': 'tech', '通信': 'tech',
+    '传媒': 'tech', '互联网': 'tech', '软件': 'tech',
+    '半导体': 'semiconductor', '芯片': 'semiconductor',
+    '国防': 'military', '军工': 'military',
+    '新能源': 'newenergy', '光伏': 'newenergy', '锂电': 'newenergy',
+    '家电': 'appliance', '白电': 'appliance',
+    '汽车': 'auto', '整车': 'auto',
+    '电力': 'utility', '公用': 'utility', '水务': 'utility', '燃气': 'utility',
+    '化工': 'chemical', '化学': 'chemical', '塑料': 'chemical', '橡胶': 'chemical', '纤维': 'chemical', '涂料': 'chemical',
+    '建筑': 'construction', '建材': 'construction',
+    '证券': 'broker', '券商': 'broker',
+    '有色': 'mining', '采矿': 'mining', '矿业': 'mining',
+    '农业': 'agriculture', '牧': 'agriculture', '渔': 'agriculture',
+  }
+  for (const [cn, key] of Object.entries(cnMap)) {
+    if (industry.includes(cn)) return PB_THRESHOLDS[key]
+  }
+  return PB_THRESHOLDS.default
+}
+
+// 负债率行业分档辅助
+export function getDebtThresholds(industry) {
+  if (!industry) return DEBT_THRESHOLDS.default
+  const lower = industry.toLowerCase()
+  for (const [key, thresholds] of Object.entries(DEBT_THRESHOLDS)) {
+    if (key === 'default') continue
+    if (lower.includes(key)) return thresholds
+  }
+  const cnMap = {
+    '银行': 'bank', '保险': 'insurance', '房地产': 'realestate',
+    '证券': 'broker', '券商': 'broker',
+    '电力': 'utility', '公用': 'utility', '水务': 'utility', '燃气': 'utility',
+    '建筑': 'construction', '建材': 'construction',
+  }
+  for (const [cn, key] of Object.entries(cnMap)) {
+    if (industry.includes(cn)) return DEBT_THRESHOLDS[key]
+  }
+  return DEBT_THRESHOLDS.default
+}
+
 /**
  * 获取趋势结论（用于诊断区卡片）
  */
@@ -497,9 +736,10 @@ export function getCapitalConclusion(capitalFlow) {
 
   // 使用与评分引擎一致的 40/60 加权公式
   if (mfLatest?.mainNetPct != null) {
-    const todayPct = mfLatest.mainNetPct
+    const todayPct = mfLatest.mainNetPct ?? 0
     const avg5Pct = mfSummary?.mainNetAvgPct5 ?? 0
-    const combinedPct = todayPct * 0.4 + avg5Pct * 0.6
+    let combinedPct = todayPct * 0.4 + avg5Pct * 0.6
+    if (isNaN(combinedPct)) combinedPct = 0
     if (combinedPct > 2) return { text: '主力流入', color: '#30d158', icon: '↑' }
     if (combinedPct > 0) return { text: '温和流入', color: '#30d158', icon: '↑' }
     if (combinedPct === 0) return { text: '平稳', color: '#ffd60a', icon: '→' }
