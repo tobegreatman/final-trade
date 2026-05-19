@@ -230,37 +230,20 @@ router.get('/api/market/breadth', async (ctx) => {
   const cached = getCached('breadth', BREADTH_CACHE_TTL)
   if (cached) { ctx.body = ok(cached); return }
 
-  // 新浪批量（覆盖沪深京全 A 股，15并发约3-5秒）
   try {
-    const sinaFetch = (url) => new Promise((resolve, reject) => {
-      https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
-        let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(JSON.parse(d)) } catch { resolve([]) } })
-      }).on('error', reject)
-    })
-    const totalStr = await sinaFetch('https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?node=hs_a')
-    const total = parseInt(totalStr) || 5500
-    const pages = Math.ceil(total / 80) + 3
-    let up = 0, down = 0, flat = 0
-    for (let i = 0; i < pages; i += 15) {
-      const batch = []
-      for (let j = i; j < Math.min(i + 15, pages); j++) {
-        batch.push(sinaFetch(`https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=${j + 1}&num=80&sort=changepercent&asc=0&node=hs_a`))
-      }
-      const results = await Promise.all(batch)
-      for (const stocks of results) {
-        for (const s of stocks) {
-          const chg = parseFloat(s.changepercent)
-          if (chg > 0) up++
-          else if (chg < 0) down++
-          else flat++
-        }
-      }
+    // 东方财富：1.000002=沪A, 0.399002=深A, 0.899050=北交所 → f104=涨,f105=跌,f106=平
+    const url = 'https://push2.eastmoney.com/api/qt/ulist/get?fltt=1&invt=2&fields=f104,f105,f106&secids=1.000002,0.399002,0.899050&ut=8dec03ba335b81bf4ebdf7b29ec27d15&pn=1&np=1&dect=1&pz=20'
+    const data = await fetchJSON(url)
+    const diff = data?.data?.diff
+    if (diff?.length) {
+      let up = 0, down = 0, flat = 0
+      for (const d of diff) { up += d.f104 || 0; down += d.f105 || 0; flat += d.f106 || 0 }
+      const result = { up, down, flat }
+      ctx.body = ok(result)
+      setCache('breadth', result)
+      return
     }
-    const result = { up, down, flat }
-    ctx.body = ok(result)
-    setCache('breadth', result)
-    return
-  } catch (e) { /* 新浪不可用 */ }
+  } catch (e) { /* 东方财富 ulist 不可用 */ }
 
   ctx.body = fail('breadth data unavailable')
 })

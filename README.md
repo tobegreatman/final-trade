@@ -125,7 +125,7 @@ cd server && node index.js   # 启动后端，配合静态文件服务使用
 |------|------|------|
 | GET | `/api/health` | 健康检查 |
 | GET | `/api/market/indices` | 三大指数 + MA20/60/120 |
-| GET | `/api/market/breadth` | 沪深京A股涨跌家数（新浪批量15并发，30秒缓存） |
+| GET | `/api/market/breadth` | 沪深京A股涨跌家数（东方财富 ulist API，30秒缓存） |
 | GET | `/api/market/indices/intraday` | 三大指数分时数据 |
 | GET | `/api/market/northbound` | 近 20 日北向资金成交额（东方财富主用，证券时报 stcn 备用） |
 | GET | `/api/market/margin` | 融资融券余额 |
@@ -248,7 +248,7 @@ Dashboard 涨跌家数使用独立的 30 秒刷新定时器（`BREADTH_INTERVAL`
 
 - 9:00 前使用前一交易日日期参数查询（获取最新收盘数据）
 - 9:00 后使用当前日期参数查询（获取盘中实时数据）
-- 东方财富 push2 系列域名从服务器端不可达，涨跌家数走新浪批量查询（15并发，30秒缓存），个股数据走腾讯备用
+- 东方财富 push2 系列域名从服务器端不可达时，涨跌家数走东方财富 ulist API（push2.eastmoney.com，单请求获取沪A+深A+北交所涨跌平家数），个股数据走腾讯备用
 - 北向资金使用 datacenter-web RPT_MUTUAL_DEALAMT 报表（主用），失败时自动回退证券时报 stcn 数据源
 - 选股优先使用 xuangu API（`POST /api/stock/xuangu`），不可用时回退本地筛选（`GET /api/stock/screen`）
 - 个股分析数据均来自东方财富 datacenter-web API：基本面(RPT_VALUEANALYSIS_DET + ZYZBAjaxNew)、融资融券(RPTA_WEB_RZRQ_GGMX)、北向资金(RPT_MUTUAL_HOLDSTOCKNDATE_STA_NEW)
