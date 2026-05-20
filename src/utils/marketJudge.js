@@ -19,7 +19,7 @@ import { MARKET_STATUS } from './constants.js'
 
 // ==================== 权重配置 ====================
 const W = { macd: 1.0, breadth: 1.5, rsi: 1.0, margin: 1.2, volumePrice: 1.3, northbound: 1.5, limitStats: 1.3 }
-const W_STRONG = 1.5
+const W_STRONG = 2.0
 const CORE_DIM_COUNT = 7  // 核心技术七维（不含宏观辅助）
 
 // ==================== 格式化工具 ====================
@@ -201,7 +201,7 @@ export function judgeMarket(indices, breadth, northbound, margin, breadthHistory
   }
 
   const status = determineStatus(bullW, bearW, prevStatus)
-  const confirmed = bullW >= 3.5 || bearW >= 3.5
+  const confirmed = (bullW >= 3.5 && bullW > bearW) || (bearW >= 3.5 && bearW > bullW)
   const longWindow = checkLongWindow(quote, ma, klines, breadth)
 
   return {
@@ -219,9 +219,9 @@ function judgeMACD(klines) {
   const macd = calcMACD(klines)
   if (!macd) return mk('MACD', '数据不足', 'neutral', W.macd, '')
 
-  const { dif, dea, hist, prevHist, difAboveZero, goldenCross, difSeries } = macd
+  const { dif, dea, hist, prevHist, difAboveZero, difSeries } = macd
 
-  // 背离检测
+  // 背离检测（优先级最高）
   const closes = klines.map(k => k.close)
   const div = detectDivergence(closes.slice(-30), difSeries.slice(-30))
   if (div === 'bullish') {
@@ -233,24 +233,45 @@ function judgeMACD(klines) {
       `价格新高但DIF未新高，DIF=${dif.toFixed(0)}，顶部反转信号`, 'bearish')
   }
 
-  if (goldenCross && difAboveZero && hist > 0 && hist > prevHist) {
-    return mk('MACD', '多头强势', 'bull', W.macd,
-      `DIF=${dif.toFixed(0)}>DEA=${dea.toFixed(0)}，零轴上方，柱状图放大`)
+  // 交叉检测（柱状图穿越零轴 = DIF 穿越 DEA）
+  const justGoldenCross = prevHist <= 0 && hist > 0
+  const justDeathCross = prevHist >= 0 && hist < 0
+
+  if (justGoldenCross) {
+    return mk('MACD', difAboveZero ? '金叉' : '金叉(弱)', 'bull',
+      difAboveZero ? W.macd : W.macd * 0.7,
+      `DIF上穿DEA，${difAboveZero ? '零轴上方，信号较强' : '零轴下方，信号偏弱'}`)
   }
-  if (goldenCross && hist > 0) {
-    return mk('MACD', '金叉确认', 'bull', W.macd,
-      `DIF=${dif.toFixed(0)}上穿DEA=${dea.toFixed(0)}，柱状图转正`)
+  if (justDeathCross) {
+    return mk('MACD', !difAboveZero ? '死叉' : '死叉(弱)', 'bear',
+      !difAboveZero ? W.macd : W.macd * 0.7,
+      `DIF下穿DEA，${!difAboveZero ? '零轴下方，信号较强' : '零轴上方，信号偏弱'}`)
   }
-  if (!goldenCross && !difAboveZero && hist < 0 && hist < prevHist) {
-    return mk('MACD', '空头强势', 'bear', W.macd,
-      `DIF=${dif.toFixed(0)}<DEA=${dea.toFixed(0)}，零轴下方，柱状图放大`)
+
+  // 持续状态（无交叉）
+  const difAboveDea = dif > dea
+
+  if (difAboveDea && difAboveZero) {
+    if (hist > prevHist) {
+      return mk('MACD', '多头强势', 'bull', W.macd,
+        `DIF=${dif.toFixed(0)}>DEA=${dea.toFixed(0)}，零轴上方，柱状图放大`)
+    }
+    return mk('MACD', '多头减弱', 'neutral', W.macd,
+      `DIF在零轴上方，但柱状图收缩，上涨动量减弱`)
   }
-  if (!goldenCross && hist < 0) {
-    return mk('MACD', '死叉确认', 'bear', W.macd,
-      `DIF=${dif.toFixed(0)}下穿DEA=${dea.toFixed(0)}，柱状图转负`)
+
+  if (!difAboveDea && !difAboveZero) {
+    if (hist < prevHist) {
+      return mk('MACD', '空头强势', 'bear', W.macd,
+        `DIF=${dif.toFixed(0)}<DEA=${dea.toFixed(0)}，零轴下方，柱状图放大`)
+    }
+    return mk('MACD', '空头减弱', 'neutral', W.macd,
+      `DIF在零轴下方，但柱状图收缩，下跌动量减弱`)
   }
-  return mk('MACD', '方向不明', 'neutral', W.macd,
-    `DIF=${dif.toFixed(0)} DEA=${dea.toFixed(0)} 柱=${hist.toFixed(0)}`)
+
+  // 零轴附近震荡（DIF和DEA方向与零轴不一致）
+  return mk('MACD', '零轴震荡', 'neutral', W.macd,
+    `DIF=${dif.toFixed(0)}，DEA=${dea.toFixed(0)}，方向不明`)
 }
 
 // ==================== RSI（含背离检测） ====================
@@ -277,24 +298,36 @@ function judgeRSI(klines) {
       `RSI顶背离，价格新高但RSI=${current.toFixed(1)}未新高，调整风险`, 'bearish')
   }
 
-  if (current > 60 && trendingUp) {
+  // 多头判定
+  if (current > 55 && trendingUp) {
     return mk('RSI', `强势 ${current.toFixed(0)}`, 'bull', W.rsi,
       `RSI(14)=${current.toFixed(1)}，持续上行，多头动量充足`)
   }
+  if (current >= 60) {
+    return mk('RSI', `偏强 ${current.toFixed(0)}`, 'bull', W.rsi * 0.7,
+      `RSI(14)=${current.toFixed(1)}，高位运行，多头格局`)
+  }
   const hadOversold = rsi5.some(r => r < 30)
-  if (hadOversold && current > 40 && current > prev) {
+  if (hadOversold && current > 45 && current > prev) {
     return mk('RSI', `超卖回升 ${current.toFixed(0)}`, 'bull', W.rsi,
       `RSI从超卖区回升至${current.toFixed(1)}，反弹信号`)
   }
-  if (current < 40 && !trendingUp) {
+
+  // 空头判定
+  if (current < 35 && !trendingUp) {
     return mk('RSI', `弱势 ${current.toFixed(0)}`, 'bear', W.rsi,
       `RSI(14)=${current.toFixed(1)}，持续下行，空头动量主导`)
   }
+  if (current < 40 && !trendingUp) {
+    return mk('RSI', `偏弱 ${current.toFixed(0)}`, 'bear', W.rsi * 0.7,
+      `RSI(14)=${current.toFixed(1)}，低位运行，偏空格局`)
+  }
   const hadOverbought = rsi5.some(r => r > 70)
-  if (hadOverbought && current < 60 && current < prev) {
+  if (hadOverbought && current < 55 && current < prev) {
     return mk('RSI', `超买回落 ${current.toFixed(0)}`, 'bear', W.rsi,
       `RSI从超买区回落至${current.toFixed(1)}，调整信号`)
   }
+
   return mk('RSI', `${current.toFixed(0)}`, 'neutral', W.rsi,
     `RSI(14)=${current.toFixed(1)}，中性区间`)
 }
@@ -307,14 +340,18 @@ function judgeBreadth(breadth, breadthHistory) {
   const { up, down } = breadth
   const ratio = down > 0 ? up / down : up
 
-  // 趋势判断（对比前几日）
+  // 趋势判断（用 3 日移动均值对比，比单日更稳健）
   let trend = ''
-  if (breadthHistory && breadthHistory.length >= 2) {
-    const prev = breadthHistory[breadthHistory.length - 2]
-    if (prev && prev.down > 0) {
-      const prevRatio = prev.up / prev.down
-      const improvement = ratio > prevRatio * 1.1
-      const deterioration = ratio < prevRatio * 0.9
+  if (breadthHistory && breadthHistory.length >= 3) {
+    const histRatios = breadthHistory
+      .filter(h => h && h.down > 0)
+      .map(h => h.up / h.down)
+    if (histRatios.length >= 2) {
+      const recent3 = histRatios.slice(-3)
+      const olderRatios = histRatios.slice(0, -1)
+      const olderAvg = olderRatios.length > 0 ? olderRatios.reduce((a, b) => a + b, 0) / olderRatios.length : ratio
+      const improvement = ratio > olderAvg * 1.1
+      const deterioration = ratio < olderAvg * 0.9
       if (improvement) trend = ' ↑改善'
       else if (deterioration) trend = ' ↓恶化'
     }
@@ -372,7 +409,7 @@ function judgeMarginBalance(margin) {
       `10日回归斜率为负(${slopePct.toFixed(2)}%/日)${accelerating}，杠杆资金撤离`)
   }
   return mk('融资余额', `${fmtAmt(latest)}`, 'neutral', W.margin,
-    `10日回归斜率${slopePct >= 0 ? '+' : ''}${slopePct.toFixed(2)}%/日，无明显趋势${accelerating}`)
+    `10日回归斜率${slopePct >= 0 ? '+' : ''}${slopePct.toFixed(2)}%/日，无明显趋势`)
 }
 
 // ==================== 量价配合（OBV 趋势） ====================
@@ -385,8 +422,21 @@ function judgeVolumePrice(klines) {
   // 20 日窗口 OBV 趋势 vs 价格趋势
   const recentCloses = closes.slice(-20)
   const recentObv = obv.slice(-20)
-  const priceUp = linearSlope(recentCloses) > 0
-  const obvUp = linearSlope(recentObv) > 0
+  const priceSlope = linearSlope(recentCloses)
+  const obvSlope = linearSlope(recentObv)
+
+  // 归一化为日均变化率，消除量纲差异
+  const priceAvg = (recentCloses[0] + recentCloses[recentCloses.length - 1]) / 2
+  const priceNorm = priceAvg > 0 ? priceSlope / priceAvg : 0
+  const obvAbs = recentObv.reduce((s, v) => s + Math.abs(v), 0) / recentObv.length
+  const obvNorm = obvAbs > 0 ? obvSlope / obvAbs : 0
+
+  // 死区：日均变化率 ±0.05% 以内视为平坦（≈20天累计1%）
+  const DEAD = 0.0005
+  const priceUp = priceNorm > DEAD
+  const priceDown = priceNorm < -DEAD
+  const obvUp = obvNorm > DEAD
+  const obvDown = obvNorm < -DEAD
 
   const last = klines[klines.length - 1]
 
@@ -407,19 +457,21 @@ function judgeVolumePrice(klines) {
     return mk('量价配合', '价涨量增', 'bull', W.volumePrice,
       `20日OBV趋势向上，量价齐升，${volInfo}`)
   }
-  if (!priceUp && obvUp) {
-    return mk('量价配合', '缩量吸筹', 'bull', W.volumePrice,
+  if (priceDown && obvUp) {
+    return mk('量价配合', '低位吸筹', 'bull', W.volumePrice * 0.6,
       `价格回调但OBV上升，资金逢低介入`)
   }
-  if (priceUp && !obvUp) {
+  if (priceUp && obvDown) {
     return mk('量价配合', '量价背离', 'bear', W.volumePrice,
       `价格上涨但OBV下降，上涨缺乏量能支撑`)
   }
-  if (!priceUp && !obvUp) {
+  if (priceDown && obvDown) {
     return mk('量价配合', '放量下跌', 'bear', W.volumePrice,
       `价格下跌且OBV持续下降，资金持续流出，抛压延续`)
   }
-  return mk('量价配合', '量价正常', 'neutral', W.volumePrice, '量价关系无明显异常')
+
+  // 斜率不显著（死区内）
+  return mk('量价配合', '量价平稳', 'neutral', W.volumePrice, '量价关系无明显趋势')
 }
 
 // ==================== 北向资金（活跃度 + 成交额趋势方向） ====================
@@ -470,10 +522,10 @@ function judgeLimitStats(limitStats) {
   const moneyPct = limitStats.moneyEffect >= 2 ? limitStats.moneyEffect : Math.round((limitStats.moneyEffect || 0) * 100)
   const t1Pct = limitStats.t1PctChange || 0
 
-  // 涨跌停比
-  const ratio = limitDown > 0 ? limitUp / limitDown : limitUp
-  // 曾涨停打开率（假突破率）
-  const failPct = (touchLimit + limitUp) > 0 ? (touchLimit / (touchLimit + limitUp) * 100) : 0
+  // 涨跌停比（limitDown=0 时按涨停量级映射，避免绝对数充当比率）
+  const ratio = limitDown > 0
+    ? limitUp / limitDown
+    : (limitUp >= 30 ? 5 : limitUp >= 10 ? 2.5 : limitUp >= 3 ? 1.5 : 1)
 
   // === 并行评分：牛信号 vs 熊信号 ===
   let bullPts = 0, bearPts = 0
@@ -490,12 +542,15 @@ function judgeLimitStats(limitStats) {
   // 2. 跌停绝对数量（恐慌指标）
   if (limitDown >= 100)     { bearPts += 3; details.push(`跌停${limitDown}家(千股跌停)`) }
   else if (limitDown >= 50) { bearPts += 2; details.push(`跌停${limitDown}家`) }
-  else if (limitDown >= 20) { bearPts += 1; details.push(`跌停${limitDown}家`) }
+  else if (limitDown >= 20) { bearPts += 2; details.push(`跌停${limitDown}家`) }
+  else if (limitDown >= 10) { bearPts += 1; details.push(`跌停${limitDown}家`) }
 
-  // 3. 涨停绝对数量 + 封板质量
-  if (limitUp >= 80 && sealPct >= 70)  { bullPts += 3; details.push(`涨停${limitUp}家，封板${sealPct}%`) }
-  else if (limitUp >= 40 && sealPct >= 50) { bullPts += 2; details.push(`涨停${limitUp}家，封板${sealPct}%`) }
-  else if (limitUp >= 20 && sealPct >= 40) { bullPts += 1 }
+  // 3. 涨停绝对数量 + 封板质量（高量级适当放宽封板率）
+  if (limitUp >= 80 && sealPct >= 70)       { bullPts += 3; details.push(`涨停${limitUp}家，封板${sealPct}%`) }
+  else if (limitUp >= 80 && sealPct >= 40)  { bullPts += 2; details.push(`涨停${limitUp}家，封板${sealPct}%`) }
+  else if (limitUp >= 40 && sealPct >= 50)  { bullPts += 2; details.push(`涨停${limitUp}家，封板${sealPct}%`) }
+  else if (limitUp >= 40 && sealPct >= 40)  { bullPts += 1 }
+  else if (limitUp >= 30 && sealPct >= 50)  { bullPts += 1 }
 
   // 4. 赚钱效应（打板次日收益）
   if (t1Pct >= 2)       { bullPts += 1; details.push(`打板次日+${t1Pct.toFixed(1)}%`) }
@@ -503,10 +558,13 @@ function judgeLimitStats(limitStats) {
   else if (t1Pct < -0.5){ bearPts += 1; details.push(`打板次日${t1Pct.toFixed(1)}%`) }
 
   // 5. 封板率低于40%（大量假突破）
-  if (sealPct > 0 && sealPct < 40 && limitUp >= 15) { bearPts += 1; details.push(`封板率仅${sealPct}%`) }
+  if (sealPct > 0 && sealPct < 40 && limitUp >= 5) { bearPts += 1; details.push(`封板率仅${sealPct}%`) }
 
   // 6. 赚钱效应低于30%
   if (moneyPct > 0 && moneyPct < 30) { bearPts += 1; details.push(`赚钱效应仅${moneyPct}%`) }
+
+  // 7. 赚钱效应高于60%（市场赚钱面广）
+  if (moneyPct >= 60) { bullPts += 1; details.push(`赚钱效应${moneyPct}%`) }
 
   // === 汇总判定 ===
   const net = bullPts - bearPts
@@ -550,14 +608,14 @@ function determineStatus(bullW, bearW, prevStatus) {
   if (BULL.has(prevStatus) && BULL.has(raw)) return raw
   if (BEAR.has(prevStatus) && BEAR.has(raw)) return raw
 
-  // 跨方向反转（多↔空）：需要 |net| ≥ 1.0
+  // 跨方向反转（多↔空）：需要 |net| ≥ 1.5
   if (BULL.has(prevStatus) && BEAR.has(raw) || BEAR.has(prevStatus) && BULL.has(raw)) {
-    if (Math.abs(net) < 1.0) return prevStatus
+    if (Math.abs(net) < 1.5) return prevStatus
     return raw
   }
 
-  // 进出中性：需要 |net| ≥ 2.0
-  if (Math.abs(net) < 2.0) return prevStatus
+  // 进出中性：需要 |net| ≥ 2.5
+  if (Math.abs(net) < 2.5) return prevStatus
 
   return raw
 }

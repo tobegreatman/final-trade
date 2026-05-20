@@ -163,18 +163,28 @@ function generateMASignals(klines, ma) {
     }
   }
 
-  // 近 5 日金叉/死叉检测（MA5 与 MA10）
-  for (let i = last; i > last - 5 && i > 1; i--) {
-    if (ma5[i] == null || ma10[i] == null || ma5[i - 1] == null || ma10[i - 1] == null) continue
-    if (ma5[i - 1] <= ma10[i - 1] && ma5[i] > ma10[i]) {
-      signals.push({ type: 'bullish', source: 'MA', text: `MA5/10金叉 (${klines[i].date})` })
-      break
+  // 交叉检测辅助：检测 [prev, curr] 是否穿越
+  function detectCross(shortArr, longArr, name, lookback) {
+    for (let i = last; i > last - lookback && i > 1; i--) {
+      if (shortArr[i] == null || longArr[i] == null || shortArr[i - 1] == null || longArr[i - 1] == null) continue
+      if (shortArr[i - 1] <= longArr[i - 1] && shortArr[i] > longArr[i]) {
+        signals.push({ type: 'bullish', source: 'MA', text: `${name}金叉 (${klines[i].date})` })
+        return true
+      }
+      if (shortArr[i - 1] >= longArr[i - 1] && shortArr[i] < longArr[i]) {
+        signals.push({ type: 'bearish', source: 'MA', text: `${name}死叉 (${klines[i].date})` })
+        return true
+      }
     }
-    if (ma5[i - 1] >= ma10[i - 1] && ma5[i] < ma10[i]) {
-      signals.push({ type: 'bearish', source: 'MA', text: `MA5/10死叉 (${klines[i].date})` })
-      break
-    }
+    return false
   }
+
+  // MA20/MA60 交叉（长线趋势，10 日窗口）
+  detectCross(ma20, ma60, 'MA20/60', 10)
+  // MA10/MA20 交叉（中线趋势，7 日窗口）
+  detectCross(ma10, ma20, 'MA10/20', 7)
+  // MA5/MA10 交叉（短线，5 日窗口）
+  detectCross(ma5, ma10, 'MA5/10', 5)
 
   return signals
 }
@@ -275,24 +285,38 @@ function generateKDJSignals(kdj, closes) {
   const k = kdj.k[last]
   const d = kdj.d[last]
 
-  // J 值极端
-  if (j > 100) signals.push({ type: 'bearish', source: 'KDJ', text: `KDJ超买 (J=${j.toFixed(1)})` })
-  else if (j < 0) signals.push({ type: 'bullish', source: 'KDJ', text: `KDJ超卖 (J=${j.toFixed(1)})` })
-
-  // K/D 超买超卖区（K>80 或 K<20）
-  if (j <= 100 && j >= 0) {
-    if (k > 80 && d > 80) signals.push({ type: 'bearish', source: 'KDJ', text: `K/D超买区 (K=${k.toFixed(1)}, D=${d.toFixed(1)})` })
-    else if (k < 20 && d < 20) signals.push({ type: 'bullish', source: 'KDJ', text: `K/D超卖区 (K=${k.toFixed(1)}, D=${d.toFixed(1)})` })
+  // 极端信号（互斥，取最强）
+  if (j < 0) {
+    signals.push({ type: 'bullish', source: 'KDJ', text: `KDJ超卖 (J=${j.toFixed(1)})` })
+  } else if (k > 80 && d > 80) {
+    signals.push({ type: 'bearish', source: 'KDJ', text: `K/D超买区 (K=${k.toFixed(1)}, D=${d.toFixed(1)})` })
+  } else if (k < 20 && d < 20) {
+    signals.push({ type: 'bullish', source: 'KDJ', text: `K/D超卖区 (K=${k.toFixed(1)}, D=${d.toFixed(1)})` })
+  } else if (j > 100) {
+    // J>100 在非超买区（K/D 未同时 >80）时为中性偏强，不判为空头
+    signals.push({ type: 'neutral', source: 'KDJ', text: `J值偏高 (J=${j.toFixed(1)})` })
   }
 
-  // K/D 金叉/死叉
+  // K/D 金叉/死叉（位置感知）
   for (let i = last; i > last - 5 && i > 1; i--) {
     if (kdj.k[i - 1] <= kdj.d[i - 1] && kdj.k[i] > kdj.d[i]) {
-      signals.push({ type: 'bullish', source: 'KDJ', text: 'K/D金叉' })
+      const crossK = kdj.k[i]
+      if (crossK < 30) {
+        signals.push({ type: 'bullish', source: 'KDJ', text: `K/D低位金叉 (K=${crossK.toFixed(0)})` })
+      } else if (crossK < 70) {
+        signals.push({ type: 'bullish', source: 'KDJ', text: 'K/D金叉' })
+      }
+      // K > 70 的金叉可靠性低，不产生信号
       break
     }
     if (kdj.k[i - 1] >= kdj.d[i - 1] && kdj.k[i] < kdj.d[i]) {
-      signals.push({ type: 'bearish', source: 'KDJ', text: 'K/D死叉' })
+      const crossK = kdj.k[i]
+      if (crossK > 70) {
+        signals.push({ type: 'bearish', source: 'KDJ', text: `K/D高位死叉 (K=${crossK.toFixed(0)})` })
+      } else if (crossK > 30) {
+        signals.push({ type: 'bearish', source: 'KDJ', text: 'K/D死叉' })
+      }
+      // K < 30 的死叉可靠性低，不产生信号
       break
     }
   }
@@ -352,24 +376,53 @@ function generateRSISignals(rsi, closes) {
   const val12 = rsi12?.[last]
   const val24 = rsi24?.[last]
 
-  // 1. RSI(6) 超买超卖
-  if (val6 > 80) signals.push({ type: 'bearish', source: 'RSI', text: `RSI(6)严重超买 (${val6.toFixed(1)})` })
-  else if (val6 > 70) signals.push({ type: 'bearish', source: 'RSI', text: `RSI(6)超买 (${val6.toFixed(1)})` })
-  else if (val6 < 20) signals.push({ type: 'bullish', source: 'RSI', text: `RSI(6)严重超卖 (${val6.toFixed(1)})` })
-  else if (val6 < 30) signals.push({ type: 'bullish', source: 'RSI', text: `RSI(6)超卖 (${val6.toFixed(1)})` })
-
-  // 2. RSI 多周期交叉确认（RSI6 穿越 RSI24）
-  if (rsi6[last] != null && rsi24?.[last] != null && rsi6[last - 1] != null && rsi24?.[last - 1] != null) {
-    if (rsi6[last - 1] <= rsi24[last - 1] && rsi6[last] > rsi24[last]) {
-      signals.push({ type: 'bullish', source: 'RSI', text: 'RSI(6/24)金叉，短期转强' })
-    }
-    if (rsi6[last - 1] >= rsi24[last - 1] && rsi6[last] < rsi24[last]) {
-      signals.push({ type: 'bearish', source: 'RSI', text: 'RSI(6/24)死叉，短期转弱' })
+  // 1. RSI(6/24) cross — 5-day lookback window
+  let hasGoldenCross = false
+  let hasDeathCross = false
+  if (rsi24?.length >= 2) {
+    const crossWindow = 5
+    for (let i = last; i > last - crossWindow && i > 0; i--) {
+      if (rsi6[i - 1] != null && rsi24[i - 1] != null && rsi6[i] != null && rsi24[i] != null) {
+        if (rsi6[i - 1] <= rsi24[i - 1] && rsi6[i] > rsi24[i]) {
+          signals.push({ type: 'bullish', source: 'RSI', text: 'RSI(6/24)金叉，短期转强' })
+          hasGoldenCross = true
+          break
+        }
+        if (rsi6[i - 1] >= rsi24[i - 1] && rsi6[i] < rsi24[i]) {
+          signals.push({ type: 'bearish', source: 'RSI', text: 'RSI(6/24)死叉，短期转弱' })
+          hasDeathCross = true
+          break
+        }
+      }
     }
   }
 
+  // 2. RSI(6) 超买超卖 — 长周期上下文感知
+  // 金叉期间跳过超买信号（趋势启动时RSI6常短暂超买，不构成看空依据）
+  if (!hasGoldenCross) {
+    if (val6 > 80) {
+      if (val12 != null && val24 != null && val12 < 65 && val24 < 60) {
+        signals.push({ type: 'neutral', source: 'RSI', text: `RSI(6)超买但中长周期未确认 (${val6.toFixed(1)})` })
+      } else {
+        signals.push({ type: 'bearish', source: 'RSI', text: `RSI(6)严重超买 (${val6.toFixed(1)})` })
+      }
+    } else if (val6 > 70) {
+      if (val12 != null && val24 != null && val12 < 65 && val24 < 60) {
+        signals.push({ type: 'neutral', source: 'RSI', text: `RSI(6)超买但中长周期未确认 (${val6.toFixed(1)})` })
+      } else {
+        signals.push({ type: 'bearish', source: 'RSI', text: `RSI(6)超买 (${val6.toFixed(1)})` })
+      }
+    }
+  }
+  // 死叉期间跳过超卖信号（下跌加速时超卖不构成反弹依据）
+  if (!hasDeathCross) {
+    if (val6 < 20) signals.push({ type: 'bullish', source: 'RSI', text: `RSI(6)严重超卖 (${val6.toFixed(1)})` })
+    else if (val6 < 30) signals.push({ type: 'bullish', source: 'RSI', text: `RSI(6)超卖 (${val6.toFixed(1)})` })
+  }
+
   // 3. 多周期共振：RSI6/12/24 全部超买或全部超卖
-  if (val6 != null && val12 != null && val24 != null) {
+  // 金叉/死叉期间跳过共振信号，避免与趋势方向矛盾
+  if (val6 != null && val12 != null && val24 != null && !hasGoldenCross && !hasDeathCross) {
     if (val6 > 70 && val12 > 65 && val24 > 60) {
       signals.push({ type: 'bearish', source: 'RSI', text: 'RSI多周期共振超买' })
     } else if (val6 < 30 && val12 < 35 && val24 < 40) {
@@ -438,17 +491,45 @@ function generateBOLLSignals(closes, boll) {
 
   if (upper == null || mid == null || lower == null) return signals
 
-  if (price >= upper * 0.98) {
-    signals.push({ type: 'bearish', source: 'BOLL', text: '触及布林上轨' })
+  // MA20 趋势方向：近 5 日价格变化判断短期趋势
+  const ma20TrendUp = len >= 25 && closes[last] > closes[last - 5]
+
+  // 1. 突破/跌破布林带（价格在带外）
+  if (price > upper) {
+    if (ma20TrendUp) {
+      signals.push({ type: 'bullish', source: 'BOLL', text: '突破布林上轨，趋势加速' })
+    } else {
+      signals.push({ type: 'neutral', source: 'BOLL', text: '突破布林上轨，持续性待确认' })
+    }
+  } else if (price < lower) {
+    if (!ma20TrendUp) {
+      signals.push({ type: 'bearish', source: 'BOLL', text: '跌破布林下轨，趋势加速' })
+    } else {
+      signals.push({ type: 'neutral', source: 'BOLL', text: '跌破布林下轨，或为假跌破' })
+    }
+  }
+  // 2. 触及上/下轨（接近但未突破）
+  else if (price >= upper * 0.98) {
+    if (ma20TrendUp) {
+      signals.push({ type: 'neutral', source: 'BOLL', text: '沿布林上轨运行，趋势偏强' })
+    } else {
+      signals.push({ type: 'bearish', source: 'BOLL', text: '触及布林上轨，超买预警' })
+    }
   } else if (price <= lower * 1.02) {
-    signals.push({ type: 'bullish', source: 'BOLL', text: '触及布林下轨' })
-  } else if (price > mid) {
+    if (!ma20TrendUp) {
+      signals.push({ type: 'neutral', source: 'BOLL', text: '沿布林下轨运行，趋势偏弱' })
+    } else {
+      signals.push({ type: 'bullish', source: 'BOLL', text: '触及布林下轨，超卖反弹' })
+    }
+  }
+  // 3. 中轨位置
+  else if (price > mid) {
     signals.push({ type: 'neutral', source: 'BOLL', text: '布林中轨上方' })
   } else {
     signals.push({ type: 'neutral', source: 'BOLL', text: '布林中轨下方' })
   }
 
-  // 收口信号（带宽收窄）
+  // 4. 收口信号（带宽收窄）
   if (len >= 40) {
     const prevUpper = boll.upper[last - 20]
     const prevLower = boll.lower[last - 20]
@@ -474,13 +555,20 @@ function generateVolumeSignals(klines) {
   const avgVol5 = klines.slice(-6, -1).reduce((s, k) => s + k.volume, 0) / 5
   const ratio = avgVol5 > 0 ? vol / avgVol5 : 1
 
+  // MA20 趋势方向：近 5 日收盘价变化
+  const ma20TrendUp = len >= 25 && klines[last].close > klines[last - 5].close
+
   // 单日异动
   if (ratio > 2 && klines[last].changePercent > 0) {
     signals.push({ type: 'bullish', source: '量价', text: '放量上涨' })
   } else if (ratio > 2 && klines[last].changePercent < 0) {
     signals.push({ type: 'bearish', source: '量价', text: '放量下跌' })
   } else if (ratio < 0.5 && klines[last].changePercent < 0) {
-    signals.push({ type: 'neutral', source: '量价', text: '缩量回调' })
+    if (ma20TrendUp) {
+      signals.push({ type: 'bullish', source: '量价', text: '缩量回调（洗盘）' })
+    } else {
+      signals.push({ type: 'bearish', source: '量价', text: '缩量下跌（无量阴跌）' })
+    }
   } else if (ratio > 0.8 && ratio < 1.2) {
     signals.push({ type: 'neutral', source: '量价', text: '量价配合良好' })
   }
@@ -491,9 +579,7 @@ function generateVolumeSignals(klines) {
     const prev5 = klines.slice(-8, -3)
     const avgPrev = prev5.reduce((s, k) => s + k.volume, 0) / prev5.length
 
-    // 连续放量：3 日均量均高于前 5 日均量
     const allAbove = recent3.every(k => k.volume > avgPrev)
-    // 连续缩量：3 日均量均低于前 5 日均量
     const allBelow = recent3.every(k => k.volume < avgPrev)
 
     const upDays = recent3.filter(k => k.changePercent > 0).length
@@ -504,9 +590,13 @@ function generateVolumeSignals(klines) {
     } else if (allAbove && downDays >= 2) {
       signals.push({ type: 'bearish', source: '量价', text: '连续放量下跌' })
     } else if (allBelow && upDays >= 2) {
-      signals.push({ type: 'neutral', source: '量价', text: '连续缩量上涨' })
+      signals.push({ type: 'bearish', source: '量价', text: '连续缩量上涨（动力不足）' })
     } else if (allBelow && downDays >= 2) {
-      signals.push({ type: 'neutral', source: '量价', text: '连续缩量调整' })
+      if (ma20TrendUp) {
+        signals.push({ type: 'neutral', source: '量价', text: '连续缩量调整（洗盘）' })
+      } else {
+        signals.push({ type: 'bearish', source: '量价', text: '连续缩量下跌（弱势延续）' })
+      }
     }
   }
 

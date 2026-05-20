@@ -97,7 +97,7 @@ export const useMarketAnalysisStore = defineStore('marketAnalysis', () => {
           if (nRes.ok && Array.isArray(nRes.data)) northbound = nRes.data
         } catch (_) {}
 
-        cyclePhase.value = determineCyclePhase(valData, breadth, limitStats, margin, northbound)
+        cyclePhase.value = determineCyclePhase(valData, breadth, limitStats, margin, northbound, cyclePhase.value?.phase)
 
         const topSectors = sectorData?.top5Strong || []
         strategy.value = generateStrategy(cyclePhase.value, topSectors)

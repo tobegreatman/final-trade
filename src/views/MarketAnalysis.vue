@@ -55,10 +55,10 @@
           <!-- Signal counts -->
           <div class="signal-row">
             <span class="signal-item">
-              <span class="c-red">▲</span> 牛市信号 {{ store.cyclePhase?.bullSignalCount ?? 0 }}/6
+              <span class="c-red">▲</span> 牛市信号 {{ store.cyclePhase?.bullSignalCount ?? 0 }}/8
             </span>
             <span class="signal-item">
-              <span class="c-green">▼</span> 熊市信号 {{ store.cyclePhase?.bearSignalCount ?? 0 }}/6
+              <span class="c-green">▼</span> 熊市信号 {{ store.cyclePhase?.bearSignalCount ?? 0 }}/8
             </span>
           </div>
         </div>

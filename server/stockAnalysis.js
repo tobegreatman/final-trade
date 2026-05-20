@@ -326,12 +326,20 @@ async function getCapitalFlowData(code) {
 
   const volumeChangeRate = prevAvgVol > 0 ? (recentAvgVol / prevAvgVol - 1) * 100 : 0
 
+  // 20 日趋势方向：近 5 日收盘均价 vs 前 15 日收盘均价
+  const recentAvgClose = recent5.reduce((s, k) => s + k.close, 0) / 5
+  const prevKlines15 = klines.slice(-20, -5)
+  const prevAvgClose = prevKlines15.length > 0 ? prevKlines15.reduce((s, k) => s + k.close, 0) / prevKlines15.length : recentAvgClose
+  const trendUp = recentAvgClose > prevAvgClose
+
   let priceVolumeSignal = '量价平稳'
   if (volumeChangeRate > 30 && recentAvgChg > 0.5) priceVolumeSignal = '放量上涨'
   else if (volumeChangeRate > 30 && recentAvgChg < -0.5) priceVolumeSignal = '放量下跌'
-  else if (volumeChangeRate < -20 && recentAvgChg < -0.5) priceVolumeSignal = '缩量下跌'
-  else if (volumeChangeRate < -20 && recentAvgChg > 0) priceVolumeSignal = '缩量调整'
-  else if (recentAvgChg > 0.5) priceVolumeSignal = '温和上涨'
+  else if (volumeChangeRate < -20 && recentAvgChg < -0.5) {
+    priceVolumeSignal = trendUp ? '缩量回调（洗盘）' : '缩量下跌（弱势）'
+  } else if (volumeChangeRate < -20 && recentAvgChg > 0) {
+    priceVolumeSignal = trendUp ? '缩量整理（蓄势）' : '缩量调整（弱势）'
+  } else if (recentAvgChg > 0.5) priceVolumeSignal = '温和上涨'
   else if (recentAvgChg < -0.5) priceVolumeSignal = '温和下跌'
 
   return {

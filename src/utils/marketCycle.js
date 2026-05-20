@@ -60,15 +60,7 @@ function scorePriceTrend(valuation) {
   if (sh.ma250Direction === 'up') score += 10
   else if (sh.ma250Direction === 'down') score -= 10
 
-  // 52周高低位置 (20%定义辅助)
-  if (sh.high52w && sh.low52w && sh.price) {
-    const range = sh.high52w - sh.low52w
-    if (range > 0) {
-      const pos = (sh.price - sh.low52w) / range
-      if (pos > 0.85) score += 5  // 接近52周高位
-      else if (pos < 0.15) score -= 5  // 接近52周低位
-    }
-  }
+  // 52周高低位置仅用于20%技术性牛/熊判定，不参与评分（高位不等于牛市信号）
 
   // PE 估值
   if (sh.pe) {
@@ -162,24 +154,20 @@ function scoreSentiment(limitStats, breadth) {
   return { score: clamp(score), hasData }
 }
 
-// 维度4: 资金流向 (权重15%) — 融资余额趋势
+// 维度4: 资金流向 (权重20%) — 融资余额趋势
 function scoreFundFlow(margin) {
   if (!margin || !Array.isArray(margin) || margin.length < 3) return { score: 50, hasData: false }
-  const recent = margin.slice(0, 3).reverse().map(m => m.totalBalance || m.balance || 0)
+  const recent = margin.slice(0, 3).reverse().map(m => m.totalBalance || m.balance || m.rzBalance || 0)
   const slope = recent.length >= 2 ? (recent[recent.length - 1] - recent[0]) / recent.length : 0
   const ratio = recent[0] > 0 ? slope / recent[0] : 0
 
-  let score
-  if (ratio > 0.005) score = 75
-  else if (ratio > 0.001) score = 60
-  else if (ratio < -0.005) score = 25
-  else if (ratio < -0.001) score = 40
-  else score = 50
+  // 连续映射: ratio 0→50, ±0.005→±25 (线性插值)
+  const score = Math.round(clamp(50 + (ratio / 0.005) * 25) * 1000) / 1000
 
   return { score, hasData: true }
 }
 
-// 维度5: 北向资金 (权重20%) — 成交额活跃度 + 市场方向联合判断
+// 维度5: 北向资金 (权重15%) — 成交额活跃度 + 市场方向联合判断
 function scoreNorthbound(northbound) {
   if (!northbound || !Array.isArray(northbound) || northbound.length < 3) return { score: 50, hasData: false }
 
@@ -229,66 +217,59 @@ function scoreNorthbound(northbound) {
 function clamp(v) { return Math.max(0, Math.min(100, v)) }
 
 // ==================== 布尔信号计数 ====================
-// 文档要求"满足3条以上"的计数法，与加权分交叉验证
+// 8 项对称计数，与加权分交叉验证
+
 function countBullSignals(valuation, breadth, limitStats, margin, northbound) {
   let count = 0
   const signals = []
-
   const sh = valuation?.indices?.find(i => i.code === 'sh')
 
-  // 1. 站上MA250 + MA250向上
+  // 1. 年线趋势
   if (sh?.aboveMa250 && sh?.ma250Direction === 'up') { count++; signals.push('站上年线且年线向上') }
 
-  // 2. 成交额活跃 (SH+SZ合计 > 20000亿)
+  // 2. 量能活跃
   const totalAmt = (valuation?.totalAmount || 0) / 1e8
   if (totalAmt > 20000) { count++; signals.push('成交额活跃(>20000亿)') }
 
-  // 3. 涨停>50 跌停<5
+  // 3. 涨停质量
   if (limitStats && (limitStats.limitUp || 0) > 50 && (limitStats.limitDown || 0) < 5) {
     count++; signals.push('涨停>50且跌停<5')
   }
 
-  // 3b. 涨停持续升温（JRJ历史环比：连续2天涨停数上升）
-  if (limitStats?.history?.length >= 3) {
-    const h = limitStats.history
-    if (h[0].limitUp > h[1].limitUp && h[1].limitUp > h[2].limitUp) {
-      count++; signals.push('涨停数连续上升')
-    }
+  // 4. 市场广度（涨5%/跌5%比例）
+  if (limitStats?.up5p && limitStats?.down5p && limitStats.up5p > limitStats.down5p * 2) {
+    count++; signals.push('涨5%远超跌5%(>2倍)')
   }
 
-  // 3c. 涨5%远超跌5%（市场广度强势）
-  if (limitStats?.up5p && limitStats?.down5p && limitStats.up5p > limitStats.down5p * 3) {
-    count++; signals.push('涨5%数量远超跌5%(>3倍)')
-  }
-
-  // 3d. 市场热度 > 65（JRJ综合情绪偏强）
-  if (limitStats?.temperature && limitStats.temperature > 65) {
-    count++; signals.push(`市场热度偏强(${limitStats.temperature.toFixed(0)})`)
-  }
-
-  // 4. 融资余额上升
+  // 5. 杠杆资金
   if (margin && Array.isArray(margin) && margin.length >= 3) {
-    const recent = margin.slice(0, 3).reverse().map(m => m.totalBalance || m.balance || 0)
+    const recent = margin.slice(0, 3).reverse().map(m => m.totalBalance || m.balance || m.rzBalance || 0)
     if (recent[2] > recent[0]) { count++; signals.push('融资余额持续上升') }
   }
 
-  // 5. 北向资金：成交额放大+市场上涨（联合信号，避免成交放大+净卖出的误判）
+  // 6. 北向活跃
   if (northbound && Array.isArray(northbound) && northbound.length >= 3) {
     const amounts = northbound.slice(0, 3).map(d => d.nfAmt || 0).filter(v => v > 0)
-    const rates = northbound.slice(0, 3).map(d => d.sciRate || d.sscRate || 0).filter(v => v !== 0)
-    const amtGrowing = amounts.length >= 2 && amounts[0] > amounts[amounts.length - 1] * 1.05
-    const marketUp = rates.length >= 1 && rates.reduce((a, b) => a + b, 0) / rates.length > 0
-    if (amtGrowing && marketUp) {
-      count++; signals.push('北向成交放大+市场上涨')
+    if (amounts.length >= 2 && amounts[0] > amounts[amounts.length - 1] * 1.05) {
+      count++; signals.push('北向成交放大(>5%)')
     }
   }
 
-  // 6. 涨跌比 > 2:1
+  // 7. 涨跌家数比
   if (breadth) {
     const up = breadth.up || 0
     const down = breadth.down || 0
     if (down > 0 && up / down > 2) { count++; signals.push('涨跌比>2:1') }
   }
+
+  // 8. 情绪偏强（热度 OR 涨停升温）
+  let emoBull = false
+  if (limitStats?.history?.length >= 3) {
+    const h = limitStats.history
+    if (h[0].limitUp > h[1].limitUp && h[1].limitUp > h[2].limitUp) emoBull = true
+  }
+  if (limitStats?.temperature && limitStats.temperature > 55) emoBull = true
+  if (emoBull) { count++; signals.push('情绪偏强(热度>55或涨停升温)') }
 
   return { count, signals }
 }
@@ -296,66 +277,54 @@ function countBullSignals(valuation, breadth, limitStats, margin, northbound) {
 function countBearSignals(valuation, breadth, limitStats, margin, northbound) {
   let count = 0
   const signals = []
-
   const sh = valuation?.indices?.find(i => i.code === 'sh')
 
-  // 1. 跌破MA250 + MA250向下
+  // 1. 年线趋势
   if (sh && !sh.aboveMa250 && sh.ma250Direction === 'down') { count++; signals.push('跌破年线且年线向下') }
 
-  // 2. 成交额萎缩
+  // 2. 量能萎缩
   const totalAmt = (valuation?.totalAmount || 0) / 1e8
   if (totalAmt > 0 && totalAmt < 8000) { count++; signals.push('成交额萎缩(<8000亿)') }
 
-  // 3. 涨停<10 跌停>30
+  // 3. 跌停恐慌
   if (limitStats && (limitStats.limitUp || 0) < 10 && (limitStats.limitDown || 0) > 30) {
     count++; signals.push('涨停<10且跌停>30')
   }
 
-  // 3b. 涨停持续衰减（JRJ历史环比：连续2天涨停数下降）
-  if (limitStats?.history?.length >= 3) {
-    const h = limitStats.history
-    if (h[0].limitUp < h[1].limitUp && h[1].limitUp < h[2].limitUp) {
-      count++; signals.push('涨停数连续下降')
-    }
-  }
-
-  // 3c. 跌5%远超涨5%（市场广度弱势）
+  // 4. 市场广度（跌5%/涨5%比例）
   if (limitStats?.up5p && limitStats?.down5p && limitStats.down5p > limitStats.up5p * 2) {
-    count++; signals.push('跌5%数量远超涨5%(>2倍)')
+    count++; signals.push('跌5%远超涨5%(>2倍)')
   }
 
-  // 3d. 市场热度 < 30（JRJ综合情绪偏弱）
-  if (limitStats?.temperature && limitStats.temperature < 30) {
-    count++; signals.push(`市场热度偏弱(${limitStats.temperature.toFixed(0)})`)
-  }
-
-  // 4. 融资余额下降
+  // 5. 杠杆资金
   if (margin && Array.isArray(margin) && margin.length >= 3) {
-    const recent = margin.slice(0, 3).reverse().map(m => m.totalBalance || m.balance || 0)
+    const recent = margin.slice(0, 3).reverse().map(m => m.totalBalance || m.balance || m.rzBalance || 0)
     if (recent[2] < recent[0]) { count++; signals.push('融资余额持续下降') }
   }
 
-  // 5. 北向资金：成交额放大+市场下跌（疑似净卖出）
+  // 6. 北向萎缩
   if (northbound && Array.isArray(northbound) && northbound.length >= 3) {
     const amounts = northbound.slice(0, 3).map(d => d.nfAmt || 0).filter(v => v > 0)
-    const rates = northbound.slice(0, 3).map(d => d.sciRate || d.sscRate || 0).filter(v => v !== 0)
-    const amtGrowing = amounts.length >= 2 && amounts[0] > amounts[amounts.length - 1] * 1.05
-    const marketDown = rates.length >= 1 && rates.reduce((a, b) => a + b, 0) / rates.length < -0.3
-    if (amtGrowing && marketDown) {
-      count++; signals.push('北向成交放大+市场下跌(疑似净卖出)')
-    }
-    // 成交额大幅萎缩也触发
     if (amounts.length >= 2 && amounts[0] < amounts[amounts.length - 1] * 0.7) {
-      count++; signals.push('北向成交额萎缩(>30%)')
+      count++; signals.push('北向成交萎缩(>30%)')
     }
   }
 
-  // 6. 涨跌比 < 1:2
+  // 7. 涨跌家数比
   if (breadth) {
     const up = breadth.up || 0
     const down = breadth.down || 0
     if (up > 0 && down / up > 2) { count++; signals.push('涨跌比<1:2') }
   }
+
+  // 8. 情绪偏弱（热度 OR 涨停降温）
+  let emoBear = false
+  if (limitStats?.history?.length >= 3) {
+    const h = limitStats.history
+    if (h[0].limitUp < h[1].limitUp && h[1].limitUp < h[2].limitUp) emoBear = true
+  }
+  if (limitStats?.temperature && limitStats.temperature < 35) emoBear = true
+  if (emoBear) { count++; signals.push('情绪偏弱(热度<35或涨停降温)') }
 
   return { count, signals }
 }
@@ -378,16 +347,41 @@ function check20PctDefinition(valuation) {
   return 'none'
 }
 
+// ==================== 状态惯性分组 ====================
+const BULL_PHASES = new Set(['bull_early', 'bull_mid', 'bull_late', 'bull_exit', 'range_bullish'])
+const BEAR_PHASES = new Set(['bear_early', 'bear_mid', 'bear_late', 'range_bearish'])
+
+function applyHysteresis(raw, prev, weightedScore) {
+  if (!prev || prev === raw) return raw
+
+  // 同方向自由切换（bull_early↔bull_mid↔bull_late 等）
+  if (BULL_PHASES.has(prev) && BULL_PHASES.has(raw)) return raw
+  if (BEAR_PHASES.has(prev) && BEAR_PHASES.has(raw)) return raw
+
+  const distance = Math.abs(weightedScore - 50)
+
+  // 跨方向反转：需要评分距中性线 ≥ 15
+  if ((BULL_PHASES.has(prev) && BEAR_PHASES.has(raw)) ||
+      (BEAR_PHASES.has(prev) && BULL_PHASES.has(raw))) {
+    if (distance < 15) return prev
+    return raw
+  }
+
+  // 进出中性：需要评分距中性线 ≥ 10
+  if (distance < 10) return prev
+  return raw
+}
+
 // ==================== 主判定函数 ====================
-export function determineCyclePhase(valuation, breadth, limitStats, margin, northbound) {
+export function determineCyclePhase(valuation, breadth, limitStats, margin, northbound, prevPhase) {
   const d1 = scorePriceTrend(valuation)
   const d2 = scoreVolumeLevel(valuation)
   const d3 = scoreSentiment(limitStats, breadth)
   const d4 = scoreFundFlow(margin)
   const d5 = scoreNorthbound(northbound)
 
-  // 五维加权: 价格25% + 量价20% + 情绪20% + 资金15% + 北向20%
-  const weights = [0.25, 0.20, 0.20, 0.15, 0.20]
+  // 五维加权: 价格25% + 量价20% + 情绪20% + 资金20% + 北向15%
+  const weights = [0.25, 0.20, 0.20, 0.20, 0.15]
   const scores = [d1, d2, d3, d4, d5]
   const weightedScore = scores.reduce((sum, s, i) => sum + s.score * weights[i], 0)
 
@@ -398,55 +392,61 @@ export function determineCyclePhase(valuation, breadth, limitStats, margin, nort
   // 20%定义
   const pct20Status = check20PctDefinition(valuation)
 
-  // 综合判定: 加权分 + 布尔计数交叉验证
-  let phase
-  if (weightedScore >= 70) phase = 'bull_early'
-  else if (weightedScore >= 60) phase = 'range_bullish'
-  else if (weightedScore >= 42) phase = 'range'
-  else if (weightedScore >= 30) phase = 'range_bearish'
-  else phase = 'bear_mid'
+  // === 评分→阶段映射（6 档，覆盖全部 10 阶段） ===
+  let raw
+  if (weightedScore >= 70) raw = 'bull'          // PE 子分类
+  else if (weightedScore >= 60) raw = 'range_bullish'
+  else if (weightedScore >= 42) raw = 'range'
+  else if (weightedScore >= 25) raw = 'range_bearish'
+  else if (weightedScore >= 20) raw = 'bear_mid'
+  else raw = 'bear_early'
 
-  // 布尔计数覆盖: 牛信号>=3条 → 至少震荡偏多; 熊信号>=3条 → 至少震荡偏空
-  // 互斥：两者同时>=3时不覆盖，避免方向打架
+  // 布尔计数覆盖: 牛信号>=3 → 至少震荡偏多; 熊信号>=3 → 至少震荡偏空
   const onlyBull = bullSignals.count >= 3 && bearSignals.count < 3 && weightedScore < 60
   const onlyBear = bearSignals.count >= 3 && bullSignals.count < 3 && weightedScore > 42
   if (onlyBull) {
-    if (phase === 'range') phase = 'range_bullish'
-    else if (phase.startsWith('range_bearish') || phase.startsWith('bear')) phase = 'range'
+    if (raw === 'range') raw = 'range_bullish'
+    else if (raw.startsWith('range_bearish') || raw.startsWith('bear')) raw = 'range'
   }
   if (onlyBear) {
-    if (phase === 'range') phase = 'range_bearish'
-    else if (phase.startsWith('range_bullish') || phase.startsWith('bull')) phase = 'range'
+    if (raw === 'range') raw = 'range_bearish'
+    else if (raw === 'range_bullish' || raw === 'bull') raw = 'range'
   }
 
-  // 20%定义硬覆盖
-  if (pct20Status === 'bear' && phase.startsWith('bull')) phase = 'range_bullish'
-  if (pct20Status === 'bull' && phase.startsWith('bear')) phase = 'range_bearish'
-
-  // 牛市子阶段细分 (PE + MA250 + 置信度)
+  // === 牛市子阶段（PE + MA250）— 仅对 bull 分数段生效 ===
   const sh = valuation?.indices?.find(i => i.code === 'sh')
-  if (phase.startsWith('bull') || phase === 'range_bullish') {
-    if (sh?.aboveMa250 && sh?.ma250Direction === 'up') {
-      const pe = sh.pe
-      if (pe) {
-        if (pe > 22) phase = 'bull_late'
-        else if (pe > 18) phase = 'bull_mid'
-        else if (phase === 'bull_early') { /* keep */ }
-      }
+  if (raw === 'bull') {
+    if (sh?.aboveMa250 && sh?.ma250Direction === 'up' && sh.pe) {
+      if (sh.pe > 25) raw = 'bull_exit'
+      else if (sh.pe > 22) raw = 'bull_late'
+      else if (sh.pe > 18) raw = 'bull_mid'
+      else raw = 'bull_early'
+    } else {
+      raw = 'bull_early'
     }
   }
 
-  // 熊市晚期: PE < 15 (文档标准)
-  if (phase.startsWith('bear') && sh?.pe && sh.pe < 15) {
-    phase = 'bear_late'
+  // 熊市晚期: PE < 15
+  if (raw === 'bear_mid' && sh?.pe && sh.pe < 15) {
+    raw = 'bear_late'
   }
 
-  // 置信度: 基于信号一致性和数据完整性
+  // 20%定义硬覆盖
+  if (pct20Status === 'bear' && raw.startsWith('bull')) raw = 'range_bullish'
+  if (pct20Status === 'bull' && raw.startsWith('bear')) raw = 'range_bearish'
+
+  // === 状态惯性 ===
+  const phase = applyHysteresis(raw, prevPhase, weightedScore)
+
+  // === 置信度（矛盾信号惩罚） ===
   const dataDimensions = scores.filter(s => s.hasData).length
   const dataCompleteness = dataDimensions / 5
-  const signalAgreement = (bullSignals.count >= 3 || bearSignals.count >= 3) ? 1.2 : 1.0
+  let signalFactor
+  if (bullSignals.count >= 3 && bearSignals.count >= 3) signalFactor = 0.7   // 信号矛盾：惩罚
+  else if (bullSignals.count >= 3 || bearSignals.count >= 3) signalFactor = 1.2  // 方向一致：提升
+  else signalFactor = 1.0
   const confidence = Math.round(
-    Math.min(100, Math.abs(weightedScore - 50) * 1.5 * dataCompleteness * signalAgreement)
+    Math.min(100, Math.abs(weightedScore - 50) * 1.5 * dataCompleteness * signalFactor)
   )
 
   return {

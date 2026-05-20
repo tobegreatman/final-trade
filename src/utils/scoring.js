@@ -80,19 +80,33 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   // ========== 技术面评分 (0-40) ==========
   const tech = dimensions.technical
 
-  // 1. 均线排列 (0-10)
+  // 1. 均线排列 + 交叉 (0-10)
   const maBullish = techSignals.find(s => s.source === 'MA' && s.type === 'bullish')
   const maBearish = techSignals.find(s => s.source === 'MA' && s.type === 'bearish')
-  const maCross = techSignals.find(s => s.source === 'MA' && (s.text.includes('金叉') || s.text.includes('死叉')))
+  const maCrosses = techSignals.filter(s => s.source === 'MA' && (s.text.includes('金叉') || s.text.includes('死叉')))
   if (maBullish?.text?.includes('多头排列')) {
     tech.items.push({ name: '均线排列', score: 10, max: 10, desc: '多头排列' })
   } else if (maBearish?.text?.includes('空头排列')) {
     tech.items.push({ name: '均线排列', score: 0, max: 10, desc: '空头排列' })
-  } else if (maCross) {
-    const crossScore = maCross.type === 'bullish' ? 7 : 3
-    tech.items.push({ name: '均线排列', score: crossScore, max: 10, desc: maCross.text })
+  } else if (maCrosses.length > 0) {
+    // 多级别交叉按优先级评分：MA20/60 > MA10/20 > MA5/10
+    let crossScore = 5, crossDesc = '中性'
+    if (maCrosses.some(s => s.text.includes('MA20/60金叉'))) {
+      crossScore = 8; crossDesc = 'MA20/60金叉'
+    } else if (maCrosses.some(s => s.text.includes('MA20/60死叉'))) {
+      crossScore = 2; crossDesc = 'MA20/60死叉'
+    } else if (maCrosses.some(s => s.text.includes('MA10/20金叉'))) {
+      crossScore = 7; crossDesc = 'MA10/20金叉'
+    } else if (maCrosses.some(s => s.text.includes('MA10/20死叉'))) {
+      crossScore = 3; crossDesc = 'MA10/20死叉'
+    } else if (maCrosses.some(s => s.text.includes('MA5/10金叉'))) {
+      crossScore = 6; crossDesc = maCrosses.find(s => s.text.includes('MA5/10金叉')).text
+    } else if (maCrosses.some(s => s.text.includes('MA5/10死叉'))) {
+      crossScore = 4; crossDesc = maCrosses.find(s => s.text.includes('MA5/10死叉')).text
+    }
+    tech.items.push({ name: '均线排列', score: crossScore, max: 10, desc: crossDesc })
   } else {
-    tech.items.push({ name: '均线排列', score: 5, max: 10, desc: '交叉/中性' })
+    tech.items.push({ name: '均线排列', score: 5, max: 10, desc: '中性' })
   }
 
   // 2. MACD 信号 (0-8) — 累加同源信号
@@ -111,12 +125,14 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   macdScore = Math.max(0, Math.min(8, macdScore))
   tech.items.push({ name: 'MACD', score: macdScore, max: 8, desc: macdDescs.length ? macdDescs.join('，') : '无明显信号' })
 
-  // 3. KDJ 信号 (0-7) — 累加同源信号（含背离）
+  // 3. KDJ 信号 (0-7) — 位置感知 + 背离加权
   const kdjSignals = techSignals.filter(s => s.source === 'KDJ')
   let kdjScore = 3
   const kdjDescs = []
   for (const s of kdjSignals) {
     if (s.text.includes('底背离')) { kdjScore += 3; kdjDescs.push(s.text) }
+    else if (s.text.includes('高位死叉')) { kdjScore -= 3; kdjDescs.push(s.text) }
+    else if (s.text.includes('低位金叉')) { kdjScore += 3; kdjDescs.push(s.text) }
     else if (s.type === 'bullish') { kdjScore += 2; kdjDescs.push(s.text) }
     else if (s.text.includes('顶背离')) { kdjScore -= 3; kdjDescs.push(s.text) }
     else if (s.type === 'bearish') { kdjScore -= 2; kdjDescs.push(s.text) }
@@ -138,8 +154,9 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   // 第二轮：计分非共振的单周期信号，但跳过已被共振覆盖的方向
   for (const s of rsiSignals) {
     if (s.text.includes('共振')) continue
-    if (hasResonanceBull && (s.text.includes('严重超卖') || s.text.includes('超卖'))) continue
-    if (hasResonanceBear && (s.text.includes('严重超买') || s.text.includes('超买'))) continue
+    if (s.type === 'neutral') { rsiDescs.push(s.text); continue }
+    if (hasResonanceBull && (s.text.includes('超卖'))) continue
+    if (hasResonanceBear && (s.text.includes('超买'))) continue
     if (s.text.includes('严重超卖') || s.text.includes('底背离')) { rsiScore += 3; rsiDescs.push(s.text) }
     else if (s.text.includes('超卖') || s.text.includes('金叉')) { rsiScore += 2; rsiDescs.push(s.text) }
     else if (s.text.includes('严重超买') || s.text.includes('顶背离')) { rsiScore -= 3; rsiDescs.push(s.text) }
@@ -148,23 +165,37 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   rsiScore = Math.max(0, Math.min(7, rsiScore))
   tech.items.push({ name: 'RSI', score: rsiScore, max: 7, desc: rsiDescs.length ? rsiDescs.join('，') : '正常区间' })
 
-  // 5. BOLL 信号 (0-4) — 均值回归视角：上轨=超买预警，下轨=超卖机会
+  // 5. BOLL 信号 (0-4) — 结合趋势方向
   const bollSignals = techSignals.filter(s => s.source === 'BOLL')
   const bollPosition = bollSignals.find(s => !s.text.includes('收口'))
   const bollSqueeze = bollSignals.find(s => s.text.includes('收口'))
   let bollScore = 3
   let bollDesc = '中轨附近'
-  if (bollPosition?.text?.includes('上轨')) {
-    bollScore = 1; bollDesc = '触及上轨（超买预警）'
-  } else if (bollPosition?.text?.includes('上方')) {
-    bollScore = 3; bollDesc = '中轨上方（偏强）'
-  } else if (bollPosition?.text?.includes('下方')) {
-    bollScore = 2; bollDesc = '中轨下方（偏弱）'
-  } else if (bollPosition?.text?.includes('下轨')) {
-    bollScore = 4; bollDesc = '触及下轨（超卖机会）'
+  if (bollPosition) {
+    const t = bollPosition.text
+    if (t.includes('突破') && t.includes('上轨') && bollPosition.type === 'bullish') {
+      bollScore = 4; bollDesc = '突破上轨，趋势加速'
+    } else if (t.includes('突破') && t.includes('上轨')) {
+      bollScore = 3; bollDesc = '突破上轨，持续性待确认'
+    } else if (t.includes('跌破') && bollPosition.type === 'bearish') {
+      bollScore = 0; bollDesc = '跌破下轨，趋势加速下行'
+    } else if (t.includes('跌破')) {
+      bollScore = 3; bollDesc = '跌破下轨，或为假跌破'
+    } else if (t.includes('沿') && t.includes('上轨')) {
+      bollScore = 4; bollDesc = '沿上轨运行，趋势偏强'
+    } else if (t.includes('触及') && t.includes('上轨')) {
+      bollScore = 1; bollDesc = '触及上轨，超买预警'
+    } else if (t.includes('沿') && t.includes('下轨')) {
+      bollScore = 1; bollDesc = '沿下轨运行，趋势偏弱'
+    } else if (t.includes('触及') && t.includes('下轨')) {
+      bollScore = 4; bollDesc = '触及下轨，超卖反弹'
+    } else if (t.includes('中轨上方')) {
+      bollScore = 3; bollDesc = '中轨上方（偏强）'
+    } else if (t.includes('中轨下方')) {
+      bollScore = 2; bollDesc = '中轨下方（偏弱）'
+    }
   }
   if (bollSqueeze) {
-    bollScore = Math.min(4, bollScore + 1)
     bollDesc += '，收口预警'
   }
   tech.items.push({ name: 'BOLL', score: bollScore, max: 4, desc: bollDesc })
@@ -175,14 +206,20 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   const volBearish = volSignals.find(s => s.type === 'bearish')
   const volNeutral = volSignals.find(s => s.type === 'neutral')
   const volSignal = volBullish || volBearish || volNeutral || volSignals[0]
-  if (volSignal?.text?.includes('放量上涨')) {
+  if (volSignal?.text?.includes('连续放量上涨')) {
+    tech.items.push({ name: '量价', score: 4, max: 4, desc: volSignal.text })
+  } else if (volSignal?.text?.includes('放量上涨')) {
+    tech.items.push({ name: '量价', score: 4, max: 4, desc: volSignal.text })
+  } else if (volSignal?.text?.includes('缩量回调')) {
     tech.items.push({ name: '量价', score: 4, max: 4, desc: volSignal.text })
   } else if (volSignal?.text?.includes('量价配合')) {
     tech.items.push({ name: '量价', score: 3, max: 4, desc: '量价配合良好' })
-  } else if (volSignal?.text?.includes('缩量回调')) {
-    tech.items.push({ name: '量价', score: 2, max: 4, desc: '缩量回调' })
-  } else if (volSignal?.text?.includes('放量下跌')) {
-    tech.items.push({ name: '量价', score: 0, max: 4, desc: '放量下跌' })
+  } else if (volSignal?.text?.includes('连续缩量调整')) {
+    tech.items.push({ name: '量价', score: 2, max: 4, desc: volSignal.text })
+  } else if (volSignal?.text?.includes('缩量上涨') || volSignal?.text?.includes('无量阴跌') || volSignal?.text?.includes('弱势延续')) {
+    tech.items.push({ name: '量价', score: 1, max: 4, desc: volSignal.text })
+  } else if (volSignal?.text?.includes('放量下跌') || volSignal?.text?.includes('缩量下跌')) {
+    tech.items.push({ name: '量价', score: 0, max: 4, desc: volSignal.text })
   } else {
     tech.items.push({ name: '量价', score: 2, max: 4, desc: volSignal?.text || '中性' })
   }
@@ -213,14 +250,17 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     if (latest.pe != null) {
       const t = getPEThresholds(industry)
       const pe = latest.pe
+      const midPE = Math.round((t.fair * 2 + t.high) / 3)
       if (pe < 0) {
         fund.items.push({ name: 'PE估值', score: 0, max: 8, desc: `PE ${pe.toFixed(1)}，亏损` })
       } else if (pe <= t.low) {
         fund.items.push({ name: 'PE估值', score: 8, max: 8, desc: `PE ${pe.toFixed(1)}，低估` })
       } else if (pe <= t.fair) {
         fund.items.push({ name: 'PE估值', score: 6, max: 8, desc: `PE ${pe.toFixed(1)}，合理` })
+      } else if (pe <= midPE) {
+        fund.items.push({ name: 'PE估值', score: 4, max: 8, desc: `PE ${pe.toFixed(1)}，略高` })
       } else if (pe <= t.high) {
-        fund.items.push({ name: 'PE估值', score: 3, max: 8, desc: `PE ${pe.toFixed(1)}，偏高` })
+        fund.items.push({ name: 'PE估值', score: 2, max: 8, desc: `PE ${pe.toFixed(1)}，偏高` })
       } else {
         fund.items.push({ name: 'PE估值', score: 1, max: 8, desc: `PE ${pe.toFixed(1)}，高估` })
       }
@@ -251,6 +291,8 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
         fund.items.push({ name: '营收增长', score: 5, max: 5, desc: `营收增长 ${latest.revenueGrowth.toFixed(1)}%，高增` })
       } else if (latest.revenueGrowth >= 10) {
         fund.items.push({ name: '营收增长', score: 4, max: 5, desc: `营收增长 ${latest.revenueGrowth.toFixed(1)}%，稳健` })
+      } else if (latest.revenueGrowth >= 5) {
+        fund.items.push({ name: '营收增长', score: 3, max: 5, desc: `营收增长 ${latest.revenueGrowth.toFixed(1)}%，中等` })
       } else if (latest.revenueGrowth >= 0) {
         fund.items.push({ name: '营收增长', score: 2, max: 5, desc: `营收增长 ${latest.revenueGrowth.toFixed(1)}%，低速` })
       } else {
@@ -264,12 +306,13 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     if (latest.profitGrowth != null) {
       const isLoss = latest.pe != null && latest.pe < 0
       if (isLoss) {
-        // 亏损企业：无论增速多高，仍处于亏损，封顶 3/5
         fund.items.push({ name: '净利增长', score: 3, max: 5, desc: `净利增长 ${latest.profitGrowth.toFixed(1)}%，仍亏损` })
       } else if (latest.profitGrowth >= 20) {
         fund.items.push({ name: '净利增长', score: 5, max: 5, desc: `净利增长 ${latest.profitGrowth.toFixed(1)}%，高增` })
       } else if (latest.profitGrowth >= 10) {
         fund.items.push({ name: '净利增长', score: 4, max: 5, desc: `净利增长 ${latest.profitGrowth.toFixed(1)}%，稳健` })
+      } else if (latest.profitGrowth >= 5) {
+        fund.items.push({ name: '净利增长', score: 3, max: 5, desc: `净利增长 ${latest.profitGrowth.toFixed(1)}%，中等` })
       } else if (latest.profitGrowth >= 0) {
         fund.items.push({ name: '净利增长', score: 2, max: 5, desc: `净利增长 ${latest.profitGrowth.toFixed(1)}%，低速` })
       } else {
@@ -300,12 +343,15 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     if (latest.pb != null) {
       const t = getPBThresholds(industry || latest.industry || '')
       const pb = latest.pb
+      const midPB = +(t.fair * 2 + t.high).toFixed(2) / 3
       if (pb <= 0) {
         fund.items.push({ name: 'PB估值', score: 0, max: 4, desc: `PB ${pb.toFixed(1)}，破净异常` })
       } else if (pb <= t.low) {
         fund.items.push({ name: 'PB估值', score: 4, max: 4, desc: `PB ${pb.toFixed(1)}，低估` })
       } else if (pb <= t.fair) {
         fund.items.push({ name: 'PB估值', score: 3, max: 4, desc: `PB ${pb.toFixed(1)}，合理` })
+      } else if (pb <= midPB) {
+        fund.items.push({ name: 'PB估值', score: 2, max: 4, desc: `PB ${pb.toFixed(1)}，略高` })
       } else if (pb <= t.high) {
         fund.items.push({ name: 'PB估值', score: 1, max: 4, desc: `PB ${pb.toFixed(1)}，偏高` })
       } else {
@@ -326,7 +372,7 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
       } else if (ratio >= 0.5) {
         fund.items.push({ name: '现金流质量', score: 2, max: 4, desc: `${r}，现金略少于账面利润` })
       } else if (ratio > 0) {
-        fund.items.push({ name: '现金流质量', score: 2, max: 4, desc: `${r}，利润含金量偏低` })
+        fund.items.push({ name: '现金流质量', score: 1, max: 4, desc: `${r}，利润含金量偏低` })
       } else if (ratio > -1) {
         fund.items.push({ name: '现金流质量', score: 1, max: 4, desc: `${r}，经营现金流出，利润质量差` })
       } else {
@@ -379,10 +425,13 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   let volDesc = priceVolumeSignal || '中性'
   if (priceVolumeSignal === '放量上涨') { volScore = 5; volDesc = '放量上涨' }
   else if (priceVolumeSignal === '温和上涨') { volScore = 4; volDesc = '温和上涨' }
-  else if (priceVolumeSignal === '缩量调整' || priceVolumeSignal === '量价平稳') { volScore = 3; volDesc = priceVolumeSignal }
+  else if (priceVolumeSignal === '缩量回调（洗盘）') { volScore = 3; volDesc = priceVolumeSignal }
+  else if (priceVolumeSignal === '缩量整理（蓄势）') { volScore = 3; volDesc = priceVolumeSignal }
+  else if (priceVolumeSignal === '量价平稳') { volScore = 3; volDesc = priceVolumeSignal }
+  else if (priceVolumeSignal === '缩量调整（弱势）') { volScore = 2; volDesc = priceVolumeSignal }
   else if (priceVolumeSignal === '温和下跌') { volScore = 1; volDesc = '温和下跌' }
+  else if (priceVolumeSignal === '缩量下跌（弱势）') { volScore = 1; volDesc = priceVolumeSignal }
   else if (priceVolumeSignal === '放量下跌') { volScore = 0; volDesc = '放量下跌' }
-  else if (priceVolumeSignal === '缩量下跌') { volScore = 1; volDesc = '缩量下跌' }
 
   cap.items.push({ name: '量价趋势', score: volScore, max: 5, desc: volDesc })
 
@@ -399,8 +448,8 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     if (isNaN(combinedPct)) combinedPct = 0
     if (combinedPct > 5) { mfScore = 8; mfDesc = '主力持续大幅流入' }
     else if (combinedPct > 2) { mfScore = 6; mfDesc = '主力流入' }
-    else if (combinedPct > 0) { mfScore = 4; mfDesc = '主力微幅流入' }
-    else if (combinedPct === 0) { mfScore = 3; mfDesc = '主力进出持平' }
+    else if (combinedPct > 0.5) { mfScore = 4; mfDesc = '主力微幅流入' }
+    else if (combinedPct >= -0.5) { mfScore = 3; mfDesc = '主力进出持平' }
     else if (combinedPct >= -2) { mfScore = 2; mfDesc = '主力微幅流出' }
     else if (combinedPct >= -5) { mfScore = 1; mfDesc = '主力流出' }
     else { mfScore = 0; mfDesc = '主力大幅流出' }
@@ -432,12 +481,12 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     // 维度1：余额变化方向 (权重60%, 范围0-5)
     const g = marginLatest.balanceGrowth
     let growthPart = 2.5
-    if (g >= 5) { growthPart = 5; marginDesc = '融资余额大幅上升' }
-    else if (g >= 2) { growthPart = 4; marginDesc = '融资余额上升' }
-    else if (g > 0) { growthPart = 3; marginDesc = '融资余额微升' }
-    else if (g === 0) { growthPart = 2.5; marginDesc = '融资余额持平' }
-    else if (g > -2) { growthPart = 1.5; marginDesc = '融资余额微降' }
-    else if (g > -5) { growthPart = 0.5; marginDesc = '融资余额下降' }
+    if (g >= 2) { growthPart = 5; marginDesc = '融资余额大幅上升' }
+    else if (g >= 0.5) { growthPart = 4; marginDesc = '融资余额上升' }
+    else if (g > 0.3) { growthPart = 3; marginDesc = '融资余额微升' }
+    else if (g >= -0.3) { growthPart = 2.5; marginDesc = '融资余额持平' }
+    else if (g >= -0.5) { growthPart = 2; marginDesc = '融资余额微降' }
+    else if (g > -2) { growthPart = 1; marginDesc = '融资余额下降' }
     else { growthPart = 0; marginDesc = '融资余额大幅下降' }
 
     // 维度2：净买入金额占余额比 (权重40%, 范围0-5)
@@ -452,14 +501,14 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     }
 
     let marginScore = Math.round(growthPart * 0.6 + buyPart * 0.4)
-    marginScore = Math.max(0, Math.min(6, marginScore))
+    marginScore = Math.max(0, Math.min(5, marginScore))
 
     // 做空信号检测：融券余额日环比（过滤小额基数误报）
     const marginHistory = capitalFlow?._marginData?.data
     if (marginHistory && marginHistory.length >= 2) {
       const rqLatest = marginHistory[marginHistory.length - 1]?.rqBalance || 0
       const rqPrev = marginHistory[marginHistory.length - 2]?.rqBalance || 0
-      if (rqPrev > 100000) {
+      if (rqPrev > 1000000) {
         const rqGrowth = (rqLatest - rqPrev) / rqPrev * 100
         if (rqGrowth > 20) {
           marginScore = Math.max(0, marginScore - 2)
@@ -484,8 +533,8 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     const r = nbLatest.changeRatio
     if (r >= 10) { nbScore = 6; nbDesc = '北向大幅增持' }
     else if (r >= 2) { nbScore = 5; nbDesc = '北向增持' }
-    else if (r > 0) { nbScore = 4; nbDesc = '北向微增' }
-    else if (r === 0) { nbScore = 3; nbDesc = '北向持股持平' }
+    else if (r > 0.5) { nbScore = 4; nbDesc = '北向微增' }
+    else if (r >= -0.5) { nbScore = 3; nbDesc = '北向持股持平' }
     else if (r > -2) { nbScore = 2; nbDesc = '北向微减' }
     else if (r > -10) { nbScore = 1; nbDesc = '北向减持' }
     else { nbScore = 0; nbDesc = '北向大幅减持' }
@@ -501,19 +550,21 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     let shDesc = '筹码稳定'
     const cr = shLatest.changeRatio
     if (cr <= -10) { shScore = 5; shDesc = '筹码高度集中' }
-    else if (cr <= -5) { shScore = 4; shDesc = '筹码趋于集中' }
-    else if (cr <= 0) { shScore = 3; shDesc = '筹码稳定' }
-    else if (cr <= 5) { shScore = 2; shDesc = '筹码略分散' }
+    else if (cr <= -5) { shScore = 4; shDesc = '筹码明显集中' }
+    else if (cr <= -3) { shScore = 4; shDesc = '筹码趋于集中' }
+    else if (cr <= -1) { shScore = 3; shDesc = '筹码略集中' }
+    else if (cr <= 1) { shScore = 3; shDesc = '筹码稳定' }
+    else if (cr <= 3) { shScore = 2; shDesc = '筹码略分散' }
+    else if (cr <= 5) { shScore = 2; shDesc = '筹码趋于分散' }
     else if (cr <= 10) { shScore = 1; shDesc = '筹码分散' }
     else { shScore = 0; shDesc = '筹码高度分散' }
 
-    // 近3期趋势修正：连续集中加分，连续分散减分
+    // 近3期趋势修正：连续集中加分，连续分散减分（要求每期幅度 > 1%）
     const shData = capitalFlow?._shareholderData
     if (shData && shData.length >= 3) {
       const recent3 = shData.slice(0, 3)
-      // 趋势：连续3期集中(-1) 或 连续3期分散(+1) 或 混合(0)
-      const allConcentrating = recent3.every(d => d.changeRatio < 0)
-      const allDispersing = recent3.every(d => d.changeRatio > 0)
+      const allConcentrating = recent3.every(d => d.changeRatio < -1)
+      const allDispersing = recent3.every(d => d.changeRatio > 1)
       if (allConcentrating) {
         shScore = Math.min(5, shScore + 1)
         shDesc += '，连续集中'
@@ -719,7 +770,9 @@ export function getValuationConclusion(fundamental) {
   if (pe < 0) return { text: '亏损', color: '#ff453a', icon: '✗' }
   if (pe <= t.low) return { text: '低估', color: '#30d158', icon: '✓' }
   if (pe <= t.fair) return { text: '合理', color: '#30d158', icon: '✓' }
-  if (pe <= t.high) return { text: '偏高', color: '#ffd60a', icon: '!' }
+  const midPE = Math.round((t.fair * 2 + t.high) / 3)
+  if (pe <= midPE) return { text: '略高', color: '#ffd60a', icon: '!' }
+  if (pe <= t.high) return { text: '偏高', color: '#ff9500', icon: '!' }
   return { text: '高估', color: '#ff453a', icon: '!' }
 }
 
@@ -741,8 +794,8 @@ export function getCapitalConclusion(capitalFlow) {
     let combinedPct = todayPct * 0.4 + avg5Pct * 0.6
     if (isNaN(combinedPct)) combinedPct = 0
     if (combinedPct > 2) return { text: '主力流入', color: '#30d158', icon: '↑' }
-    if (combinedPct > 0) return { text: '温和流入', color: '#30d158', icon: '↑' }
-    if (combinedPct === 0) return { text: '平稳', color: '#ffd60a', icon: '→' }
+    if (combinedPct > 0.5) return { text: '温和流入', color: '#30d158', icon: '↑' }
+    if (combinedPct >= -0.5) return { text: '平稳', color: '#ffd60a', icon: '→' }
     if (combinedPct >= -2) return { text: '温和流出', color: '#ffd60a', icon: '→' }
     return { text: '主力流出', color: '#ff453a', icon: '↓' }
   }
@@ -751,7 +804,9 @@ export function getCapitalConclusion(capitalFlow) {
 
   if (signal === '放量上涨') return { text: '资金流入', color: '#30d158', icon: '↑' }
   if (signal === '温和上涨') return { text: '温和流入', color: '#30d158', icon: '↑' }
+  if (signal === '缩量回调（洗盘）' || signal === '缩量整理（蓄势）') return { text: '缩量整理', color: '#ffd60a', icon: '→' }
   if (signal === '放量下跌') return { text: '资金流出', color: '#ff453a', icon: '↓' }
-  if (signal === '缩量下跌') return { text: '缩量流出', color: '#ff453a', icon: '↓' }
+  if (signal.includes('缩量下跌') || signal.includes('弱势')) return { text: '缩量流出', color: '#ff453a', icon: '↓' }
+  if (signal.includes('缩量调整')) return { text: '缩量整理', color: '#ffd60a', icon: '→' }
   return { text: '平稳', color: '#ffd60a', icon: '→' }
 }
