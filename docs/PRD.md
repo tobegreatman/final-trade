@@ -1,7 +1,7 @@
 # SmartStock 智能股票交易辅助系统 — 产品需求文档 (PRD)
 
-> 版本: 4.3
-> 更新日期: 2026-05-20
+> 版本: 4.6
+> 更新日期: 2026-05-27
 > 基于: 系统源码反向生成
 
 ---
@@ -167,7 +167,7 @@ MACRO = abs(macroScore) * 0.5  // 宏观因子修正项，由服务端计算
 | 牛市 | bullW ≥ 4.5 且 net > 0 | 80-100% | 趋势突破 |
 | 偏多 | bullW ≥ 3.0 且 net > 0 | 50-70% | 回调买入 |
 | 震荡 | 其他 | ≤50% | 回调买入 |
-| 偏空 | bearW ≥ 3.0 且 net < 0 | 20-40% | 仅观望 |
+| 偏空 | bearW ≥ 3.0 且 net < 0 | 10-20% | 仅观望 |
 | 熊市 | bearW ≥ 4.5 且 net < 0 | 0-20% | 空仓 |
 
 其中 net = bullW − bearW。
@@ -186,32 +186,37 @@ MACRO = abs(macroScore) * 0.5  // 宏观因子修正项，由服务端计算
 
 #### 3.1.3 策略选股建议
 
-根据八维判据结果自动匹配策略，**复用选股筛选页面的四层漏斗逻辑**生成选股条件，通过东方财富 xuangu API 实时查询候选股票。选股条件中加入 RS 强势行业过滤（取板块轮动 TOP3 强势行业）。
+根据八维判据结果自动匹配策略，**复用选股筛选页面的四层漏斗逻辑**生成自然语言选股条件（keyWordNew 字符串），优先通过东财 AI 自然语言选股 API 实时查询候选股票，AI 解析不完整时自动回退到结构化选股 API。选股条件中加入 RS 强势行业过滤（取板块轮动 TOP3 强势行业）。
 
-**四层漏斗预设**（由 `getStrategyPreset()` 根据市场状态自动填充）：
+**四层漏斗预设**（由 `getStrategyPreset()` 根据市场状态自动填充，支持严/宽两种模式）：
 
-| 市场状态 | 第一层排雷 | 第二层基本面 | 第三层景气度 | 第四层技术信号 |
+| 市场状态 | 第一层排雷 | 第二层基本面（严/宽） | 第三层景气度 | 第四层技术信号 |
 |---------|-----------|------------|------------|-------------|
-| 牛市 | 8 项全选（auto 项） | ROE>12%, 营收增速>10%, 利润增速>10%, 负债率<60%, PE 5-40, 市值≥50亿 | 无 | 趋势突破（放量突破20日高点+MACD金叉+均线多头） |
-| 偏多 | 8 项全选 | ROE>12%, 负债率<60%, PE 5-40, 市值≥50亿 | 无 | 回调买入（接近MA20+缩量） |
-| 震荡 | 8 项全选 | ROE>12%, 负债率<60%, 现金流+, PE 5-30, 市值≥50亿 | 无 | 回调买入 |
+| 牛市 | 8 项全选（auto 项） | ROE≥12/8, 营收增速≥10/5, 利润增速≥10/5, 负债率≤60/65, PE 5~40 / 3~60, 市值≥50/30亿 | 机构增持 | 趋势突破（MACD金叉+均线多头排列） |
+| 偏多 | 8 项全选 | ROE≥12/8, 营收增速≥0/5, 利润增速≥0/5, 负债率≤60/65, PE 5~40 / 3~60, 市值≥50/30亿 | 无 | 回调买入（均线多头排列+量能收缩） |
+| 震荡 | 8 项全选 | ROE≥12/8, 营收增速≥0/5, 利润增速≥0/5, 负债率≤60/65, 现金流+(严)/无(宽), PE 5~30 / 3~50, 市值≥50/30亿 | 业绩超预期 | 回调买入（严：均线多头+明显缩量）/ 底部确认（可切换） |
 | 偏空/熊市 | — | — | — | 不生成选股建议 |
 
 排雷层固定选中所有 `auto: true` 的 8 项（非ST、非停牌、非北交所、非退市、审计意见、商誉<30%、质押<60%、上市>1年），与选股筛选页面一致。
 
-**一句话选股**:
-共用工具函数 `buildScreenerPrompt()` 生成自然语言条件（Dashboard 和 Screener 页面共用同一逻辑，避免 drift）。调用东方财富 xuangu API（`np-tjxg-b.eastmoney.com`）实时解析并返回匹配股票。用户可：
-- 直接使用自动生成的条件查询
-- 点击「编辑条件」自定义修改选股条件
-- 点击「查询」提交自定义条件
-- 点击「恢复默认」回到系统自动生成的条件
+**AI 智能选股（主用）**:
+共用工具函数 `buildKeyWordNew()` 将四层漏斗参数转换为东财 AI 选股 API 的自然语言 keyWordNew 字符串（Dashboard 和 Screener 页面共用同一逻辑，避免 drift）。AI API 返回 `responseConditionList` 展示已解析的条件标签。前端回退判定：若 AI 返回 total>200 且 conditions<3，说明解析不完整，自动回退到结构化 API。
 
-**提示词示例（偏多/回调买入）**:
-> 非ST，非停牌，非北交所，非退市，审计意见为标准无保留意见，商誉占净资产比例小于30%，大股东质押比例小于60%，上市时间大于1年，ROE大于12%，资产负债率小于60%，市盈率5到40，流通市值大于50亿，股价大于60日均线，60日均线向上，股价接近20日均线，偏离不超过2%，5日均量小于20日均量的70%
+**结构化选股（回退）**:
+`buildStructuredFilter()` 将四层漏斗参数转换为东方财富 xuangu 结构化 API 的 filter 字符串，作为 AI 选股不可用时的回退方案。`buildFilterDescription()` 生成可读中文描述，展示在选股结果上方。
 
-**候选股卡片**展示：股票名称、流通市值、价格、涨跌幅、PE、PB、换手率、成交量。点击跳转股票池页面。
+**登录态管理**:
+AI 选股 API 在无登录态时只能解析 2-3 个条件。通过 `server/.env` 配置 `EASTMONEY_EMAUTH` cookie 值，后端自动注入 `Cookie: emauth=xxx` 请求头。前端通过 `GET /api/stock/xuangu/ai/status` 检测 cookie 配置状态，未配置时显示黄色提示条。
 
-**后端接口**: `POST /api/stock/xuangu`（主用，自然语言选股）、`GET /api/stock/screen`（备用，本地两步筛选）
+**filter 字符串示例（偏多/回调买入/宽模式）**:
+> (TRADE_MARKET_CODE in ("上交所主板","深交所主板","深交所创业板","上交所科创板"))(@LISTING_DATE="OVER1Y")(GOODWILL_TO_NETASSET<30)(PLEDGE_RATIO<60)(ROE_WEIGHT>=8)(DEBT_ASSET_RATIO<=65)(PE9>3)(PE9<=60)(TOTAL_MARKET_CAP>=3000000000)(LONG_AVG_ARRAY="1")
+
+**keyWordNew 示例（偏多/回调买入/宽模式）**:
+> 非ST，非停牌，非北交所，非退市，上市时间超过1年，商誉占净资产比例小于30%，质押比例小于60%，营收增速大于等于5%，利润增速大于等于5%，负债率小于等于65%，PE 3~50，市值大于等于30亿，回调买入：均线多头排列 + 量能收缩
+
+**候选股卡片**展示：股票名称、涨跌幅、PE、PB、换手率、主力净流入、量比。点击跳转股票池页面。
+
+**后端接口**: `GET /api/stock/xuangu/structured`（主用，结构化选股 API）
 
 #### 3.1.4 做多窗口速判
 
@@ -386,19 +391,17 @@ Dashboard 统一面板，始终显示资金流向数据，RS 轮动数据在有�
 
 #### 3.3.4 第四层：技术信号（3 选 1）
 
-| 策略 | 条件 |
-|------|------|
-| 趋势突破 | 放量突破 20 日高点 + MACD 金叉 + MA20↑ + MA60↑ |
-| 回调买入 | 股价 > MA60 且 MA60↑ + 股价接近20日均线偏离不超过2% + 5日均量小于20日均量的70% |
-| 底部右侧确认 | 从高点跌 > 40% + 缩量后放量 + RSI < 30 拐头 + MACD 金叉 |
+| 策略 | filter 条件 | 说明 |
+|------|------------|------|
+| 趋势突破 | `MACD_GOLDEN_FORK="1"` + `LONG_AVG_ARRAY="1"` | MACD 金叉 + 均线多头排列，确认趋势强度 |
+| 回调买入 | `LONG_AVG_ARRAY="1"` + `VOLUME_RATIO<1.2` | 均线多头排列 + 量能收缩（严模式 `VOLUME_RATIO<1` 更严格） |
+| 底部右侧确认 | `KDJ_GOLDEN_FORK="1"` + `UPSIDE_VOLUME="1"` | KDJ 金叉 + 放量上攻 |
 
 #### 3.3.5 输出
 
-根据勾选条件自动生成三部分输出（由共用工具函数 `buildScreenerPrompt()` 生成，与 Dashboard 策略选股共用同一逻辑）：
+根据勾选条件自动生成自然语言 keyWordNew 字符串（由共用工具函数 `buildKeyWordNew()` 生成，与 Dashboard 策略选股共用同一逻辑），优先调用东财 AI 自然语言选股 API 查询匹配股票。AI 解析不完整时自动回退到结构化选股 API（`buildStructuredFilter()`）。
 
-1. **一句话选股（移动端）** — 可直接复制到东方财富 App「一句话选股」，使用中文逗号分隔
-2. **手动确认条件（PC端）** — 东方财富 NLP 不支持的条件，需人工确认（如龙虎榜机构席位、研报数量）
-3. **PC 公式代码** — 可直接粘贴到东方财富 PC 端「公式编辑器」或通达信
+`buildFilterDescription()` 生成可读中文描述，展示在查询结果上方，便于用户理解当前选股条件。`responseConditionList` 中的已解析条件以标签形式展示。
 
 ---
 
@@ -809,7 +812,9 @@ Tab 内容区：综合评分（默认）| 技术面 | 基本面 | 资金面
 | GET | `/stock/batch/quotes` | `?codes=xxx,yyy` | 批量实时行情（含名称、价、涨跌幅、成交额） |
 | GET | `/stock/search` | `?kw=关键词` | 股票搜索（支持代码/名称/拼音），仅返回 A 股 |
 | GET | `/stock/screen` | `?strategy=trend\|pullback&count=10` | 策略选股（备用，两步筛选：ROE池 + 行情过滤） |
-| POST | `/stock/xuangu` | `{ prompt: "选股条件" }` | 一句话选股（主用，调用东方财富 xuangu API） |
+| GET | `/stock/xuangu/structured` | `?filter=xxx` | 结构化选股（回退，调用东方财富 xuangu 结构化 API，返回匹配股票列表） |
+| POST | `/stock/xuangu/ai` | `{keyWordNew, pageSize, pageNo}` | AI 智能选股（主用，东财自然语言 API，返回股票 + 已解析条件列表 + 来源标记） |
+| GET | `/stock/xuangu/ai/status` | — | AI 选股登录态状态（hasCookie: boolean） |
 
 #### 个股分析
 
@@ -852,18 +857,35 @@ Tab 内容区：综合评分（默认）| 技术面 | 基本面 | 资金面
 }
 ```
 
-#### 一句话选股结果 (xuangu)
+#### 结构化选股结果 (xuangu/structured)
 ```json
 {
   "stocks": [
-    { "code": "002027", "name": "分众传媒", "price": 5.92, "change": -1.82,
-      "pe": 11.94, "pb": 5.54, "turnover": 0.94, "marketCap": 8549800000,
-      "volume": "1.36亿", "amount": 813000000 }
+    { "code": "002027", "name": "分众传媒", "change": -1.82,
+      "pe": 11.94, "pb": 5.54, "turnover": 0.94,
+      "mainFlow": 50000, "marketCap": 8549800000, "volumeRatio": 0.85 }
   ],
+  "filter": "(TRADE_MARKET_CODE in (...))(ROE_WEIGHT>=8)...",
+  "count": 15
+}
+```
+
+#### AI 智能选股结果 (xuangu/ai)
+```json
+{
+  "stocks": [
+    { "code": "603112", "name": "华翔股份", "price": 22.41, "change": -0.93,
+      "turnover": 2.63, "pe": 21.17, "pb": 2.74, "marketCap": 12100000000,
+      "volumeRatio": 1.15, "goodwillRatio": null, "pledgeRatio": 4.91,
+      "debtRatio": 31.44, "revenueGrowth": 8.10, "profitGrowth": 10.41,
+      "industry": "上交所主板" }
+  ],
+  "total": 2,
   "conditions": [
-    { "describe": "净资产收益率ROE(加权)大于12%", "count": 71 }
+    { "conditionId": 1, "describe": "非[ST股票]", "isValid": true },
+    { "conditionId": 14, "describe": "市盈率(TTM)介于3~50", "isValid": true }
   ],
-  "total": 71
+  "source": "ai"
 }
 ```
 
@@ -960,7 +982,7 @@ interface Trade {
 | marketAnalysis store | macro, sectors, valuation | 60 秒刷新，带 localStorage 缓存 |
 | market store (localStorage) | northbound, margin, limitStats, prevStatus | 成功获取后写入，页面刷新后先读缓存 |
 | storage.js (共享) | loadJson/saveJson/loadNumber/saveNumber | 统一 try/catch 保护所有 localStorage 操作 |
-| screenerPrompt.js (共享) | buildScreenerPrompt + getStrategyPreset | Dashboard 和 Screener 共用四层漏斗 prompt 生成 |
+| screenerPrompt.js (共享) | buildKeyWordNew + buildMarketStateQuery + buildStructuredFilter + buildFilterDescription + getStrategyPreset | Dashboard 和 Screener 共用四层漏斗：AI 自然语言 keyWordNew 生成（主用）、结构化 filter 生成（回退）、可读描述 |
 | indicators.js | calcMA/calcMACD/calcKDJ/calcRSI/calcBOLL/calcAllIndicators | 技术指标计算 + 6 类信号生成 |
 | scoring.js | calculateScore/getPEThresholds/getPBThresholds/getDebtThresholds/getTrendConclusion/getValuationConclusion/getCapitalConclusion | 三维度评分引擎（技术40/基本面42/资金29）+ 行业感知 PE/PB/负债率阈值（20行业PE/PB，7组负债率） |
 | watchlist store | quotes | 按 REFRESH_INTERVAL 刷新 |
@@ -1094,7 +1116,9 @@ ATR(14) = SMA(TR, 14)  // 取最近 15 根 K 线，计算后 14 个 TR 的均值
 - 涨跌家数采用东方财富 ulist API（push2.eastmoney.com/api/qt/ulist/get），单请求汇总沪A(1.000002)+深A(0.399002)+北交所(0.899050) 的涨(f104)/跌(f105)/平(f106)家数，30秒缓存
 - 东方财富 push2 系列域名（push2/push2his）不稳定时，自动切换到腾讯/新浪备用数据源（`server/fallback.js`）
 - 北向资金使用 datacenter-web 的 RPT_MUTUAL_DEALAMT 报表（主用），失败时自动回退到证券时报 stcn 数据源（`info.stcn.com/dc/sjb/newindex.jsp?p=xcxBszjcjetusj`）
-- 选股功能：xuangu API 不可用时可回退到本地两步筛选（`/api/stock/screen`）
+- 选股功能三级回退：AI 自然语言选股（`np-tjxg-g.eastmoney.com`，主用）→ 结构化选股 API（`data.eastmoney.com`，回退）→ 本地两步筛选（`/api/stock/screen`，兜底）
+- AI 选股 API 在无登录态（`EASTMONEY_EMAUTH` cookie）时只能解析 2-3 个条件；前端回退判定：AI 返回 total>200 且 conditions<3 时自动切换到结构化 API
+- AI 选股结果以 keyWordNew 内容为缓存 key，TTL 5 分钟
 - 单个数据请求失败不影响其他数据的正常展示
 - 图表加载中/加载失败/无数据三种状态明确区分
 - 北向资金、融资余额、涨跌停数据持久化到 localStorage 作为本地缓存
@@ -1130,7 +1154,7 @@ SmartStock
 │   ├── 综合判定结果
 │   ├── 宏观因子卡片 (PMI/M1-M2/CPI/GDP/社融)
 │   ├── 行业资金流向 & RS 轮动 (涨幅TOP5 + 资金TOP5 + RS强弱TOP5)
-│   ├── 策略选股建议 (一句话选股 + RS行业过滤 + 可编辑条件 + 候选股)
+│   ├── 策略选股建议 (AI智能选股 + 结构化回退 + 景气度确认 + RS行业过滤 + keyWordNew描述 + 条件标签 + 候选股 + 震荡可切换底部确认)
 │   ├── 做多窗口速判
 │   └── 交易前检查清单
 ├── 股票池 (Watchlist)
@@ -1147,7 +1171,7 @@ SmartStock
 │   ├── 基本面参数 (7项)
 │   ├── 景气度选择 (3选1)
 │   ├── 技术信号选择 (3选1)
-│   └── 筛选条件输出 (移动端NLP + 手动条件 + PC公式)
+│   └── 筛选条件输出 (AI自然语言keyWordNew + 已解析条件标签 + 可读描述 + 候选股列表 + 结构化filter回退)
 ├── 仓位计算 (Position)
 │   ├── ATR 动态计算器
 │   ├── 行业集中度

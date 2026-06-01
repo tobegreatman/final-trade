@@ -70,7 +70,13 @@ const DEBT_THRESHOLDS = {
  * @param {string} industry - 行业名称（可选，用于 PE 分档）
  * @returns {Object} { total, dimensions, suggestion, confidence, details }
  */
-export function calculateScore(techSignals = [], fundamental = null, capitalFlow = null, industry = '') {
+const STYLE_WEIGHTS = {
+  short: { technical: 0.50, fundamental: 0.20, capital: 0.30 },
+  mid:   { technical: 0.40, fundamental: 0.35, capital: 0.25 },
+  long:  { technical: 0.30, fundamental: 0.45, capital: 0.25 },
+}
+
+export function calculateScore(techSignals = [], fundamental = null, capitalFlow = null, industry = '', style = 'short') {
   const dimensions = {
     technical: { score: 0, max: 40, items: [] },
     fundamental: { score: 0, max: 42, items: [] },
@@ -169,18 +175,18 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   const bollSignals = techSignals.filter(s => s.source === 'BOLL')
   const bollPosition = bollSignals.find(s => !s.text.includes('收口'))
   const bollSqueeze = bollSignals.find(s => s.text.includes('收口'))
-  let bollScore = 3
+  let bollScore = 2
   let bollDesc = '中轨附近'
   if (bollPosition) {
     const t = bollPosition.text
     if (t.includes('突破') && t.includes('上轨') && bollPosition.type === 'bullish') {
       bollScore = 4; bollDesc = '突破上轨，趋势加速'
     } else if (t.includes('突破') && t.includes('上轨')) {
-      bollScore = 3; bollDesc = '突破上轨，持续性待确认'
+      bollScore = 2; bollDesc = '突破上轨，持续性待确认'
     } else if (t.includes('跌破') && bollPosition.type === 'bearish') {
       bollScore = 0; bollDesc = '跌破下轨，趋势加速下行'
     } else if (t.includes('跌破')) {
-      bollScore = 3; bollDesc = '跌破下轨，或为假跌破'
+      bollScore = 1; bollDesc = '跌破下轨，或为假跌破'
     } else if (t.includes('沿') && t.includes('上轨')) {
       bollScore = 4; bollDesc = '沿上轨运行，趋势偏强'
     } else if (t.includes('触及') && t.includes('上轨')) {
@@ -188,7 +194,7 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     } else if (t.includes('沿') && t.includes('下轨')) {
       bollScore = 1; bollDesc = '沿下轨运行，趋势偏弱'
     } else if (t.includes('触及') && t.includes('下轨')) {
-      bollScore = 4; bollDesc = '触及下轨，超卖反弹'
+      bollScore = 2; bollDesc = '触及下轨，超卖区'
     } else if (t.includes('中轨上方')) {
       bollScore = 3; bollDesc = '中轨上方（偏强）'
     } else if (t.includes('中轨下方')) {
@@ -425,11 +431,11 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   let volDesc = priceVolumeSignal || '中性'
   if (priceVolumeSignal === '放量上涨') { volScore = 5; volDesc = '放量上涨' }
   else if (priceVolumeSignal === '温和上涨') { volScore = 4; volDesc = '温和上涨' }
-  else if (priceVolumeSignal === '缩量回调（洗盘）') { volScore = 3; volDesc = priceVolumeSignal }
-  else if (priceVolumeSignal === '缩量整理（蓄势）') { volScore = 3; volDesc = priceVolumeSignal }
+  else if (priceVolumeSignal === '缩量回调（洗盘）') { volScore = 4; volDesc = priceVolumeSignal }
+  else if (priceVolumeSignal === '缩量整理（蓄势）') { volScore = 4; volDesc = priceVolumeSignal }
   else if (priceVolumeSignal === '量价平稳') { volScore = 3; volDesc = priceVolumeSignal }
   else if (priceVolumeSignal === '缩量调整（弱势）') { volScore = 2; volDesc = priceVolumeSignal }
-  else if (priceVolumeSignal === '温和下跌') { volScore = 1; volDesc = '温和下跌' }
+  else if (priceVolumeSignal === '温和下跌') { volScore = 2; volDesc = '温和下跌' }
   else if (priceVolumeSignal === '缩量下跌（弱势）') { volScore = 1; volDesc = priceVolumeSignal }
   else if (priceVolumeSignal === '放量下跌') { volScore = 0; volDesc = '放量下跌' }
 
@@ -446,6 +452,17 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     const avg5Pct = mfSummary?.mainNetAvgPct5 ?? 0
     let combinedPct = todayPct * 0.4 + avg5Pct * 0.6
     if (isNaN(combinedPct)) combinedPct = 0
+    // 格化流入/流出金额
+    const netInflow = mfLatest.mainNetInflow
+    const fmtAmt = (v) => {
+      const abs = Math.abs(v)
+      const sign = v < 0 ? '-' : '+'
+      if (abs >= 1e8) return `${sign}${(abs / 1e8).toFixed(2)}亿`
+      if (abs >= 1e4) return `${sign}${(abs / 1e4).toFixed(0)}万`
+      return `${sign}${abs.toFixed(0)}元`
+    }
+    const amtStr = netInflow > 0 ? `净流入${fmtAmt(netInflow)}` : netInflow < 0 ? `净流出${fmtAmt(netInflow)}` : ''
+
     if (combinedPct > 5) { mfScore = 8; mfDesc = '主力持续大幅流入' }
     else if (combinedPct > 2) { mfScore = 6; mfDesc = '主力流入' }
     else if (combinedPct > 0.5) { mfScore = 4; mfDesc = '主力微幅流入' }
@@ -453,18 +470,23 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     else if (combinedPct >= -2) { mfScore = 2; mfDesc = '主力微幅流出' }
     else if (combinedPct >= -5) { mfScore = 1; mfDesc = '主力流出' }
     else { mfScore = 0; mfDesc = '主力大幅流出' }
+    if (amtStr) mfDesc += `（${amtStr}）`
 
-    // 主力资金10日趋势加成
+    // 主力资金趋势加成（含今日日内数据）
     const mfData = capitalFlow?._mainForceData
     if (mfData && mfData.length >= 10) {
       const recent5Avg = mfData.slice(-5).reduce((s, d) => s + (d.mainNetInflow || 0), 0) / 5
       const prev5Avg = mfData.slice(-10, -5).reduce((s, d) => s + (d.mainNetInflow || 0), 0) / 5
       if (recent5Avg > prev5Avg) {
         mfScore = Math.min(8, mfScore + 1)
-        mfDesc += '，趋势上升'
+        if (recent5Avg >= 0) mfDesc += '，趋势上升'
+        else if (netInflow > 0) mfDesc += '，趋势改善'
+        else mfDesc += '，流出减缓'
       } else if (recent5Avg < prev5Avg) {
         mfScore = Math.max(0, mfScore - 1)
-        mfDesc += '，趋势减弱'
+        if (recent5Avg <= 0) mfDesc += '，趋势恶化'
+        else if (netInflow < 0) mfDesc += '，趋势转弱'
+        else mfDesc += '，流入减缓'
       }
     }
 
@@ -491,7 +513,7 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
 
     // 维度2：净买入金额占余额比 (权重40%, 范围0-5)
     let buyPart = 2.5
-    if (marginLatest.rzNetBuy != null && marginLatest.rzBalance > 0) {
+    if (marginLatest.rzNetBuy != null && marginLatest.rzBalance > 100) {
       const buyRatio = marginLatest.rzNetBuy / marginLatest.rzBalance * 100
       if (buyRatio >= 1) buyPart = 5
       else if (buyRatio >= 0.3) buyPart = 4
@@ -503,12 +525,14 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     let marginScore = Math.round(growthPart * 0.6 + buyPart * 0.4)
     marginScore = Math.max(0, Math.min(5, marginScore))
 
-    // 做空信号检测：融券余额日环比（过滤小额基数误报）
+    // 做空信号检测：融券余额日环比（使用相对比例过滤小额误报）
     const marginHistory = capitalFlow?._marginData?.data
     if (marginHistory && marginHistory.length >= 2) {
       const rqLatest = marginHistory[marginHistory.length - 1]?.rqBalance || 0
       const rqPrev = marginHistory[marginHistory.length - 2]?.rqBalance || 0
-      if (rqPrev > 1000000) {
+      // 融券余额需占融资余额一定比例才有分析意义，避免小额基数误判
+      const rqRatio = marginLatest.rzBalance > 0 ? rqLatest / marginLatest.rzBalance : 0
+      if (rqRatio > 0.005 && rqPrev > 0) {
         const rqGrowth = (rqLatest - rqPrev) / rqPrev * 100
         if (rqGrowth > 20) {
           marginScore = Math.max(0, marginScore - 2)
@@ -583,10 +607,11 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
 
   // ========== 动态权重合成 ==========
   const hasFundData = !!fundamental?.latest
+  const baseWeights = STYLE_WEIGHTS[style] || STYLE_WEIGHTS.mid
 
   const weights = hasFundData
-    ? { technical: 0.45, fundamental: 0.30, capital: 0.25 }
-    : { technical: 0.60, fundamental: 0.15, capital: 0.25 }
+    ? baseWeights
+    : { technical: Math.min(baseWeights.technical + 0.10, 0.65), fundamental: Math.max(baseWeights.fundamental - 0.10, 0.10), capital: baseWeights.capital }
 
   const total = Math.round(
     tech.score / tech.max * 100 * weights.technical +
@@ -620,7 +645,6 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     suggestion = totalDataPoints < 5 ? '数据不足，建议仅供参考' : '多空交织，观望为主'
     suggestionColor = '#ffd60a'
   } else if (total >= 30) {
-    // 技术面得分高于中性但信号偏空 → 提示风险而非直接判空
     if (bearishCount >= 3 && techPct < 0.5) {
       suggestion = '空头占优，等待企稳信号'
     } else if (bearishCount >= 3) {
@@ -656,91 +680,56 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   }
 }
 
+// ==================== 行业匹配公共逻辑 ====================
+const INDUSTRY_CN_MAP = {
+  '银行': 'bank', '保险': 'insurance', '房地产': 'realestate',
+  '钢铁': 'steel', '煤炭': 'coal', '食品': 'food', '饮料': 'food',
+  '白酒': 'food', '酒': 'food',
+  '医药': 'medicine', '生物': 'medicine',
+  '计算机': 'tech', '电子': 'tech', '通信': 'tech',
+  '传媒': 'tech', '互联网': 'tech', '软件': 'tech',
+  '半导体': 'semiconductor', '芯片': 'semiconductor',
+  '国防': 'military', '军工': 'military',
+  '新能源': 'newenergy', '光伏': 'newenergy', '锂电': 'newenergy',
+  '家电': 'appliance', '白电': 'appliance',
+  '汽车': 'auto', '整车': 'auto',
+  '电力': 'utility', '公用': 'utility', '水务': 'utility', '燃气': 'utility',
+  '化工': 'chemical', '化学': 'chemical', '塑料': 'chemical', '橡胶': 'chemical', '纤维': 'chemical', '涂料': 'chemical',
+  '建筑': 'construction', '建材': 'construction',
+  '证券': 'broker', '券商': 'broker',
+  '有色': 'mining', '采矿': 'mining', '矿业': 'mining',
+  '农业': 'agriculture', '牧': 'agriculture', '渔': 'agriculture',
+}
+
+function matchIndustryKey(industry) {
+  if (!industry) return null
+  const lower = industry.toLowerCase()
+  for (const key of Object.keys(PE_THRESHOLDS)) {
+    if (key === 'default') continue
+    if (lower.includes(key)) return key
+  }
+  for (const [cn, key] of Object.entries(INDUSTRY_CN_MAP)) {
+    if (industry.includes(cn)) return key
+  }
+  return null
+}
+
 // PE 行业分档辅助（导出供组件使用）
 export function getPEThresholds(industry) {
-  if (!industry) return PE_THRESHOLDS.default
-  const lower = industry.toLowerCase()
-  for (const [key, thresholds] of Object.entries(PE_THRESHOLDS)) {
-    if (key === 'default') continue
-    if (lower.includes(key)) return thresholds
-  }
-  // 中文行业名匹配
-  const cnMap = {
-    '银行': 'bank', '保险': 'insurance', '房地产': 'realestate',
-    '钢铁': 'steel', '煤炭': 'coal', '食品': 'food', '饮料': 'food',
-    '白酒': 'food', '酒': 'food',
-    '医药': 'medicine', '生物': 'medicine',
-    '计算机': 'tech', '电子': 'tech', '通信': 'tech',
-    '传媒': 'tech', '互联网': 'tech', '软件': 'tech',
-    '半导体': 'semiconductor', '芯片': 'semiconductor',
-    '国防': 'military', '军工': 'military',
-    '新能源': 'newenergy', '光伏': 'newenergy', '锂电': 'newenergy',
-    '家电': 'appliance', '白电': 'appliance',
-    '汽车': 'auto', '整车': 'auto',
-    '电力': 'utility', '公用': 'utility', '水务': 'utility', '燃气': 'utility',
-    '化工': 'chemical', '化学': 'chemical', '塑料': 'chemical', '橡胶': 'chemical', '纤维': 'chemical', '涂料': 'chemical',
-    '建筑': 'construction', '建材': 'construction',
-    '证券': 'broker', '券商': 'broker',
-    '有色': 'mining', '采矿': 'mining', '矿业': 'mining',
-    '农业': 'agriculture', '牧': 'agriculture', '渔': 'agriculture',
-  }
-  for (const [cn, key] of Object.entries(cnMap)) {
-    if (industry.includes(cn)) return PE_THRESHOLDS[key]
-  }
-  return PE_THRESHOLDS.default
+  const key = matchIndustryKey(industry)
+  return (key && PE_THRESHOLDS[key]) ? PE_THRESHOLDS[key] : PE_THRESHOLDS.default
 }
 
 // PB 行业分档辅助
 export function getPBThresholds(industry) {
-  if (!industry) return PB_THRESHOLDS.default
-  const lower = industry.toLowerCase()
-  for (const [key, thresholds] of Object.entries(PB_THRESHOLDS)) {
-    if (key === 'default') continue
-    if (lower.includes(key)) return thresholds
-  }
-  const cnMap = {
-    '银行': 'bank', '保险': 'insurance', '房地产': 'realestate',
-    '钢铁': 'steel', '煤炭': 'coal', '食品': 'food', '饮料': 'food',
-    '白酒': 'food', '酒': 'food',
-    '医药': 'medicine', '生物': 'medicine',
-    '计算机': 'tech', '电子': 'tech', '通信': 'tech',
-    '传媒': 'tech', '互联网': 'tech', '软件': 'tech',
-    '半导体': 'semiconductor', '芯片': 'semiconductor',
-    '国防': 'military', '军工': 'military',
-    '新能源': 'newenergy', '光伏': 'newenergy', '锂电': 'newenergy',
-    '家电': 'appliance', '白电': 'appliance',
-    '汽车': 'auto', '整车': 'auto',
-    '电力': 'utility', '公用': 'utility', '水务': 'utility', '燃气': 'utility',
-    '化工': 'chemical', '化学': 'chemical', '塑料': 'chemical', '橡胶': 'chemical', '纤维': 'chemical', '涂料': 'chemical',
-    '建筑': 'construction', '建材': 'construction',
-    '证券': 'broker', '券商': 'broker',
-    '有色': 'mining', '采矿': 'mining', '矿业': 'mining',
-    '农业': 'agriculture', '牧': 'agriculture', '渔': 'agriculture',
-  }
-  for (const [cn, key] of Object.entries(cnMap)) {
-    if (industry.includes(cn)) return PB_THRESHOLDS[key]
-  }
-  return PB_THRESHOLDS.default
+  const key = matchIndustryKey(industry)
+  return (key && PB_THRESHOLDS[key]) ? PB_THRESHOLDS[key] : PB_THRESHOLDS.default
 }
 
 // 负债率行业分档辅助
 export function getDebtThresholds(industry) {
-  if (!industry) return DEBT_THRESHOLDS.default
-  const lower = industry.toLowerCase()
-  for (const [key, thresholds] of Object.entries(DEBT_THRESHOLDS)) {
-    if (key === 'default') continue
-    if (lower.includes(key)) return thresholds
-  }
-  const cnMap = {
-    '银行': 'bank', '保险': 'insurance', '房地产': 'realestate',
-    '证券': 'broker', '券商': 'broker',
-    '电力': 'utility', '公用': 'utility', '水务': 'utility', '燃气': 'utility',
-    '建筑': 'construction', '建材': 'construction',
-  }
-  for (const [cn, key] of Object.entries(cnMap)) {
-    if (industry.includes(cn)) return DEBT_THRESHOLDS[key]
-  }
-  return DEBT_THRESHOLDS.default
+  const key = matchIndustryKey(industry)
+  return (key && DEBT_THRESHOLDS[key]) ? DEBT_THRESHOLDS[key] : DEBT_THRESHOLDS.default
 }
 
 /**

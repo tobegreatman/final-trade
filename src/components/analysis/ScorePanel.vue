@@ -64,16 +64,32 @@
           </div>
         </div>
       </div>
+
+      <!-- AI 综合判断 -->
+      <div v-if="scoreResult" class="ai-judge-section">
+        <h4 class="section-title">综合判断 <span class="ai-badge">AI</span></h4>
+        <div v-if="aiJudgeLoading && !aiJudgeText" class="ai-skeleton">
+          <div class="ai-skeleton-line" />
+          <div class="ai-skeleton-line short" />
+          <div class="ai-skeleton-line" />
+        </div>
+        <div v-if="aiJudgeText" class="ai-content" v-html="renderedAIContent" />
+        <span v-if="aiJudgeLoading && aiJudgeText" class="ai-cursor" />
+        <div v-if="aiJudgeError && !aiJudgeText" class="ai-error">{{ aiJudgeError }}</div>
+      </div>
     </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from 'vue'
 import * as echarts from 'echarts'
 
 const props = defineProps({
-  scoreResult: { type: Object, default: null }
+  scoreResult: { type: Object, default: null },
+  aiJudgeText: { type: String, default: '' },
+  aiJudgeLoading: { type: Boolean, default: false },
+  aiJudgeError: { type: String, default: '' },
 })
 
 const gaugeRef = ref(null)
@@ -101,6 +117,18 @@ const dimensionList = computed(() => {
 const fundDetails = computed(() => (props.scoreResult?.details || []).filter(d => d.dimension === '基本面'))
 const capitalDetails = computed(() => (props.scoreResult?.details || []).filter(d => d.dimension === '资金面'))
 const techDetails = computed(() => (props.scoreResult?.details || []).filter(d => d.dimension === '技术面'))
+
+const renderedAIContent = computed(() => {
+  const text = props.aiJudgeText
+  if (!text) return ''
+  // 白名单渲染：先转义全部 HTML，再只还原允许的标记
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>')
+})
 
 function getVerdict(item) {
   const ratio = item.max > 0 ? item.score / item.max : 0
@@ -220,9 +248,36 @@ onBeforeUnmount(() => {
 
 onActivated(() => {
   nextTick(() => {
+    if (gaugeRef.value && !gaugeChart) {
+      gaugeChart = echarts.init(gaugeRef.value)
+      renderGauge()
+    }
+    if (gaugeRef.value && gaugeChart && !gaugeRef.value._ro) {
+      const ro = new ResizeObserver(() => gaugeChart?.resize())
+      ro.observe(gaugeRef.value)
+      gaugeRef.value._ro = ro
+    }
+    if (radarRef.value && !radarChart) {
+      radarChart = echarts.init(radarRef.value)
+      renderRadar()
+    }
+    if (radarRef.value && radarChart && !radarRef.value._ro) {
+      const ro = new ResizeObserver(() => radarChart?.resize())
+      ro.observe(radarRef.value)
+      radarRef.value._ro = ro
+    }
     gaugeChart?.resize()
     radarChart?.resize()
   })
+})
+
+onDeactivated(() => {
+  if (gaugeRef.value?._ro) { gaugeRef.value._ro.disconnect(); gaugeRef.value._ro = null }
+  if (radarRef.value?._ro) { radarRef.value._ro.disconnect(); radarRef.value._ro = null }
+  gaugeChart?.dispose()
+  radarChart?.dispose()
+  gaugeChart = null
+  radarChart = null
 })
 </script>
 
@@ -230,7 +285,7 @@ onActivated(() => {
 .score-panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 5px;
 }
 
 .no-data {
@@ -242,6 +297,7 @@ onActivated(() => {
 .score-row {
   display: flex;
   align-items: center;
+  height: 200px;
 }
 
 .gauge-wrap {
@@ -328,13 +384,16 @@ onActivated(() => {
 .details-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0px;
 }
 
 .section-title {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .details-cols {
@@ -468,5 +527,85 @@ onActivated(() => {
     width: 36px;
     font-size: 12px;
   }
+}
+
+.ai-judge-section {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ai-badge {
+  display: inline-block;
+  background: linear-gradient(135deg, #0071e3, #5856d6);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  vertical-align: middle;
+}
+
+.ai-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-skeleton-line {
+  height: 14px;
+  background: linear-gradient(90deg, var(--bg-surface-alt) 25%, rgba(255,255,255,0.06) 50%, var(--bg-surface-alt) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 4px;
+  width: 100%;
+}
+
+.ai-skeleton-line.short {
+  width: 60%;
+}
+
+.ai-content {
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text-primary);
+}
+
+.ai-content :deep(strong) {
+  color: #e2e8f0;
+  font-weight: 700;
+}
+
+.ai-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 16px;
+  background: var(--accent, #0071e3);
+  animation: blink 0.8s ease-in-out infinite;
+  vertical-align: text-bottom;
+  margin-left: 2px;
+  border-radius: 1px;
+}
+
+.ai-error {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.03);
+  border-radius: var(--radius-sm);
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 </style>

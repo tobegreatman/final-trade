@@ -2,38 +2,38 @@
   <div class="fundamental-panel">
     <div v-if="!fundamental?.latest" class="no-data">暂无基本面数据</div>
     <template v-else>
-      <!-- 区块 1: 估值区间 -->
-      <div class="section">
-        <h4 class="section-title">估值区间</h4>
-        <div class="valuation-bars">
-          <div class="valuation-row">
-            <span class="val-label">PE</span>
-            <div class="val-bar-wrap">
-              <div class="val-bar">
-                <div class="val-marker" :style="{ left: pePercentile + '%' }" />
-              </div>
-              <span class="val-current">{{ formatNum(latest.pe) }}倍</span>
-            </div>
-            <span class="val-percentile">{{ pePercentile }}分位</span>
-          </div>
-          <div class="valuation-row">
-            <span class="val-label">PB</span>
-            <div class="val-bar-wrap">
-              <div class="val-bar">
-                <div class="val-marker" :style="{ left: pbPercentile + '%' }" />
-              </div>
-              <span class="val-current">{{ formatNum(latest.pb) }}倍</span>
-            </div>
-            <span class="val-percentile">{{ pbPercentile }}分位</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 区块 2+3: 财务趋势 + 核心指标 一行 -->
+      <!-- 财务趋势 + 估值区间（左列） | 核心指标（右列） -->
       <div class="trend-indicators-row">
-        <div v-if="fundamental?.history?.length >= 2" class="section trend-section">
-          <h4 class="section-title">财务趋势（近 {{ displayHistory.length }} 季度）</h4>
-          <div ref="trendChartRef" class="trend-chart" />
+        <div class="trend-col">
+          <div class="section">
+            <h4 class="section-title">估值区间</h4>
+            <div class="valuation-bars">
+              <div class="valuation-row">
+                <span class="val-label">PE</span>
+                <div class="val-bar-wrap">
+                  <div class="val-bar">
+                    <div class="val-marker" :style="{ left: pePercentile + '%' }" />
+                  </div>
+                  <span class="val-current">{{ formatNum(latest.pe) }}倍</span>
+                </div>
+                <span class="val-percentile">{{ pePercentile }}分位</span>
+              </div>
+              <div class="valuation-row">
+                <span class="val-label">PB</span>
+                <div class="val-bar-wrap">
+                  <div class="val-bar">
+                    <div class="val-marker" :style="{ left: pbPercentile + '%' }" />
+                  </div>
+                  <span class="val-current">{{ formatNum(latest.pb) }}倍</span>
+                </div>
+                <span class="val-percentile">{{ pbPercentile }}分位</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="fundamental?.history?.length >= 2" class="section trend-section">
+            <h4 class="section-title">财务趋势（近 {{ displayHistory.length }} 季度）</h4>
+            <div ref="trendChartRef" class="trend-chart" />
+          </div>
         </div>
         <div class="section indicators-section">
           <h4 class="section-title">核心指标</h4>
@@ -115,9 +115,10 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from 'vue'
 import * as echarts from 'echarts'
 import { getPEThresholds, getPBThresholds, getDebtThresholds } from '../../utils/scoring.js'
+import { formatNum, formatPct, formatMarketCap } from '../../utils/format.js'
 
 const props = defineProps({
   fundamental: { type: Object, default: null }
@@ -137,11 +138,9 @@ const pePercentile = computed(() => {
   const h = props.fundamental?.history || []
   const pe = latest.value?.pe
   if (pe == null || !h.length) return 50
-  // 排除最新一期，避免当前值包含在分布中
   const pes = h.slice(1).map(d => d.pe).filter(v => v != null && v > 0).sort((a, b) => a - b)
   if (!pes.length) return 50
-  const idx = pes.findIndex(v => v >= pe)
-  return Math.round((idx >= 0 ? idx : pes.length) / pes.length * 100)
+  return calcPercentile(pes, pe)
 })
 
 const pbPercentile = computed(() => {
@@ -150,28 +149,22 @@ const pbPercentile = computed(() => {
   if (pb == null || !h.length) return 50
   const pbs = h.slice(1).map(d => d.pb).filter(v => v != null && v > 0).sort((a, b) => a - b)
   if (!pbs.length) return 50
-  const idx = pbs.findIndex(v => v >= pb)
-  return Math.round((idx >= 0 ? idx : pbs.length) / pbs.length * 100)
+  return calcPercentile(pbs, pb)
 })
 
-function formatNum(v) {
-  if (v == null) return '--'
-  if (Math.abs(v) >= 1e8) return (v / 1e8).toFixed(2) + '亿'
-  if (Math.abs(v) >= 1e4) return (v / 1e4).toFixed(2) + '万'
-  return Number.isInteger(v) ? v.toString() : v.toFixed(2)
+function calcPercentile(sorted, value) {
+  const n = sorted.length
+  if (value <= sorted[0]) return 0
+  if (value >= sorted[n - 1]) return 100
+  let count = 0
+  for (const v of sorted) {
+    if (v < value) count++
+    else break
+  }
+  return Math.round(count / n * 100)
 }
 
-function formatPct(v) {
-  if (v == null) return '--'
-  return v.toFixed(1) + '%'
-}
 
-function formatMarketCap(v) {
-  if (v == null) return '--'
-  if (v >= 1e12) return (v / 1e12).toFixed(2) + '万亿'
-  if (v >= 1e8) return (v / 1e8).toFixed(1) + '亿'
-  return (v / 1e4).toFixed(0) + '万'
-}
 
 // --- PE（行业感知） ---
 function getPEClass(v) {
@@ -293,13 +286,6 @@ function getDebtHint(v) {
 }
 
 // --- 现金流 ---
-function formatCashFlow(v) {
-  if (v == null) return '--'
-  if (Math.abs(v) >= 1e8) return (v / 1e8).toFixed(2) + '亿'
-  if (Math.abs(v) >= 1e4) return (v / 1e4).toFixed(1) + '万'
-  return v.toLocaleString()
-}
-
 function getCashFlowClass(ratio) {
   if (ratio == null) return ''
   if (ratio >= 1.0) return 'val-good'
@@ -400,7 +386,25 @@ onBeforeUnmount(() => {
 })
 
 onActivated(() => {
-  nextTick(() => trendChart?.resize())
+  nextTick(() => {
+    const hist = props.fundamental?.history || []
+    if (trendChartRef.value && hist.length >= 2 && !trendChart) {
+      trendChart = echarts.init(trendChartRef.value)
+      renderTrendChart()
+    }
+    if (trendChartRef.value && trendChart && !trendChartRef.value._ro) {
+      const ro = new ResizeObserver(() => trendChart?.resize())
+      ro.observe(trendChartRef.value)
+      trendChartRef.value._ro = ro
+    }
+    trendChart?.resize()
+  })
+})
+
+onDeactivated(() => {
+  if (trendChartRef.value?._ro) { trendChartRef.value._ro.disconnect(); trendChartRef.value._ro = null }
+  trendChart?.dispose()
+  trendChart = null
 })
 </script>
 
@@ -491,15 +495,22 @@ onActivated(() => {
   text-align: right;
 }
 
-/* 财务趋势 + 核心指标 一行 */
+/* 财务趋势 + 估值区间（左列） | 核心指标（右列） */
 .trend-indicators-row {
   display: flex;
   gap: 16px;
   align-items: flex-start;
 }
 
-.trend-section {
+.trend-col {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.trend-section {
   min-width: 0;
 }
 

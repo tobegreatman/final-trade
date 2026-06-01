@@ -276,13 +276,13 @@ const buyDecisionTree = [
 ]
 
 const marketDimensions = [
-  { name: 'MACD (1.0)', source: '上证指数 MACD(12,26,9)', bull: '金叉+零轴上方+柱状图放大（背离×1.5）', bear: '死叉+零轴下方+柱状图放大（背离×1.5）' },
-  { name: '涨跌家数 (1.5)', source: '沪深京A股实时涨跌统计', bull: '涨跌比≥2（强2.25），≥1.5（牛）', bear: '涨跌比≤0.5（强2.25），<0.67（熊）' },
-  { name: 'RSI (1.0)', source: '上证指数 RSI(14)', bull: 'RSI>60且上行 或 超卖回升（背离×1.5）', bear: 'RSI<40且下行 或 超买回落（背离×1.5）' },
+  { name: 'MACD (1.0)', source: '上证指数 MACD(12,26,9)', bull: '金叉+零轴上方+柱状图放大（背离×2.0）', bear: '死叉+零轴下方+柱状图放大（背离×2.0）' },
+  { name: '涨跌家数 (1.5)', source: '沪深京A股实时涨跌统计', bull: '涨跌比≥2（强2.0），≥1.5（牛）', bear: '涨跌比≤0.5（强2.0），<0.67（熊）' },
+  { name: 'RSI (1.0)', source: '上证指数 RSI(14)', bull: 'RSI>55且上行 或 超卖回升（背离×2.0）', bear: 'RSI<35且下行 或 超买回落（背离×2.0）' },
   { name: '融资余额 (1.2)', source: '近10日融资余额线性回归', bull: '回归斜率>+0.3%/日', bear: '回归斜率<-0.3%/日' },
-  { name: '量价配合 (1.3)', source: '上证指数OBV趋势+背离', bull: '价涨量增/OBV底背离（强1.95）', bear: '放量下跌/OBV顶背离（强1.95）' },
+  { name: '量价配合 (1.3)', source: '上证指数OBV趋势+背离', bull: '价涨量增/OBV底背离（强2.0）', bear: '放量下跌/OBV顶背离（强2.0）' },
   { name: '北向资金 (1.5)', source: '近20日北向成交额均量比', bull: '5日均量/20日均量≥1.2', bear: '5日均量/20日均量≤0.8' },
-  { name: '涨跌停 (1.3)', source: '并行评分（涨跌比/跌停数/封板率等）', bull: '评分net≥2（强≥4→1.95）', bear: '评分net≤-2（强≤-4→1.95）' },
+  { name: '涨跌停 (1.3)', source: '并行评分（涨跌比/跌停数/封板率等）', bull: '评分net≥2（强≥4→2.0）', bear: '评分net≤-2（强≤-4→2.0）' },
   { name: '宏观因子 (≤1.0)', source: 'PMI/M1-M2剪刀差/CPI/GDP/社融', bull: 'PMI>50.5 + 剪刀差收窄 + GDP>5.5% + 社融>10%', bear: 'PMI<49.5 + 剪刀差扩大 + CPI<0% + 社融<8%' }
 ]
 
@@ -290,7 +290,7 @@ const marketStatusTable = [
   { status: '牛市', tag: 'bull', condition: 'bullW ≥ 4.5 且 net > 0', position: '80-100%', strategy: '趋势突破', color: 'var(--red)' },
   { status: '偏多', tag: 'bull-lean', condition: 'bullW ≥ 3.0 且 net > 0', position: '50-70%', strategy: '回调买入', color: 'var(--red)' },
   { status: '震荡', tag: 'neutral', condition: '其他', position: '≤50%', strategy: '回调买入', color: 'var(--text-secondary)' },
-  { status: '偏空', tag: 'bear-lean', condition: 'bearW ≥ 3.0 且 net < 0', position: '20-40%', strategy: '仅观望', color: 'var(--green)' },
+  { status: '偏空', tag: 'bear-lean', condition: 'bearW ≥ 3.0 且 net < 0', position: '10-20%', strategy: '仅观望', color: 'var(--green)' },
   { status: '熊市', tag: 'bear', condition: 'bearW ≥ 4.5 且 net < 0', position: '0-20%', strategy: '空仓', color: 'var(--green)' }
 ]
 

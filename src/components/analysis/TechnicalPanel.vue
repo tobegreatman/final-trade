@@ -1,28 +1,45 @@
 <template>
   <div class="technical-panel">
-    <!-- 周期切换 -->
+    <!-- 周期切换 + 技术信号 -->
     <div class="period-bar">
-      <button v-for="p in periods" :key="p.klt" :class="['period-btn', { active: activePeriod === p.klt }]" @click="switchPeriod(p.klt)">
-        {{ p.label }}
-      </button>
+      <div class="period-btns">
+        <button v-for="p in periods" :key="p.klt" :class="['period-btn', { active: activePeriod === p.klt }]" @click="switchPeriod(p.klt)">
+          {{ p.label }}
+        </button>
+      </div>
+      <div v-if="signals.length" class="signal-list">
+        <span v-for="(s, i) in signals" :key="i" :class="['signal-badge', s.type]">
+          {{ s.text }}
+        </span>
+      </div>
+      <span v-else class="no-signals">暂无信号</span>
     </div>
 
-    <!-- K 线图表 -->
-    <div ref="chartRef" class="kline-chart" />
-
-    <!-- 信号徽章 -->
-    <div v-if="signals.length" class="signals-bar">
-      <span v-for="(s, i) in signals" :key="i" :class="['signal-badge', s.type]">
-        {{ s.text }}
-      </span>
+    <!-- 图表 + 右侧指标面板 -->
+    <div class="chart-layout">
+      <div ref="chartRef" class="kline-chart" />
+      <div v-if="latestIndicators.length" class="analysis-sidebar">
+        <div class="sidebar-section">
+          <div class="sidebar-title">最新指标</div>
+          <div class="indicator-grid">
+            <template v-for="g in latestIndicators" :key="g.group">
+              <div class="ind-group-label">{{ g.group }}</div>
+              <div class="ind-row" v-for="item in g.items" :key="item.label">
+                <span class="ind-label">{{ item.label }}</span>
+                <span class="ind-value" :style="{ color: item.color }">{{ item.value }}</span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
     </div>
-    <div v-else class="signals-bar empty">暂无技术信号</div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch, onMounted, onBeforeUnmount, onActivated, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from 'vue'
 import * as echarts from 'echarts'
+import { formatVol } from '../../utils/format.js'
 
 const props = defineProps({
   klines: { type: Array, default: () => [] },
@@ -35,6 +52,64 @@ const emit = defineEmits(['period-change'])
 
 const chartRef = ref(null)
 let chart = null
+
+const fmt = (v) => {
+  if (v == null) return '--'
+  const n = Number(v)
+  if (Number.isInteger(n)) return n.toString()
+  return parseFloat(n.toFixed(4)).toString()
+}
+
+const latestIndicators = computed(() => {
+  const ind = props.indicators
+  const last = props.klines.length - 1
+  if (last < 0) return []
+
+  const groups = []
+
+  // MA
+  const ma = ind.ma || {}
+  const maItems = []
+  const maColors = { 5: '#ffd60a', 10: '#30d158', 20: '#0071e3', 60: '#ff9500' }
+  for (const p of [5, 10, 20, 60]) {
+    if (ma[p]?.[last] != null) maItems.push({ label: `MA${p}`, value: fmt(ma[p][last]), color: maColors[p] })
+  }
+  if (maItems.length) groups.push({ group: '均线 MA', items: maItems })
+
+  // MACD
+  const macd = ind.macd || {}
+  const macdItems = []
+  if (macd.dif?.[last] != null) macdItems.push({ label: 'DIF', value: fmt(macd.dif[last]), color: '#ffd60a' })
+  if (macd.dea?.[last] != null) macdItems.push({ label: 'DEA', value: fmt(macd.dea[last]), color: '#0071e3' })
+  if (macd.histogram?.[last] != null) macdItems.push({ label: 'MACD', value: fmt(macd.histogram[last]), color: macd.histogram[last] >= 0 ? '#ff453a' : '#30d158' })
+  if (macdItems.length) groups.push({ group: 'MACD', items: macdItems })
+
+  // KDJ
+  const kdj = ind.kdj || {}
+  const kdjItems = []
+  if (kdj.k?.[last] != null) kdjItems.push({ label: 'K', value: fmt(kdj.k[last]), color: '#ffd60a' })
+  if (kdj.d?.[last] != null) kdjItems.push({ label: 'D', value: fmt(kdj.d[last]), color: '#0071e3' })
+  if (kdj.j?.[last] != null) kdjItems.push({ label: 'J', value: fmt(kdj.j[last]), color: '#ff453a' })
+  if (kdjItems.length) groups.push({ group: 'KDJ', items: kdjItems })
+
+  // RSI
+  const rsi = ind.rsi || {}
+  const rsiItems = []
+  if (rsi[6]?.[last] != null) rsiItems.push({ label: 'RSI6', value: fmt(rsi[6][last]), color: '#ffd60a' })
+  if (rsi[12]?.[last] != null) rsiItems.push({ label: 'RSI12', value: fmt(rsi[12][last]), color: '#0071e3' })
+  if (rsi[24]?.[last] != null) rsiItems.push({ label: 'RSI24', value: fmt(rsi[24][last]), color: '#ff9500' })
+  if (rsiItems.length) groups.push({ group: 'RSI', items: rsiItems })
+
+  // BOLL
+  const boll = ind.boll || {}
+  const bollItems = []
+  if (boll.upper?.[last] != null) bollItems.push({ label: 'UPR', value: fmt(boll.upper[last]), color: 'rgba(255,149,0,0.7)' })
+  if (boll.mid?.[last] != null) bollItems.push({ label: 'MID', value: fmt(boll.mid[last]), color: 'rgba(255,149,0,0.9)' })
+  if (boll.lower?.[last] != null) bollItems.push({ label: 'LOW', value: fmt(boll.lower[last]), color: 'rgba(255,149,0,0.7)' })
+  if (bollItems.length) groups.push({ group: 'BOLL', items: bollItems })
+
+  return groups
+})
 
 const periods = [
   { klt: '101', label: '日K' },
@@ -51,21 +126,6 @@ function buildChartOption() {
   const klines = props.klines
   const ind = props.indicators
   if (!klines.length) return null
-
-  // 数字精度格式化：最多4位小数，去除尾部0
-  const fmt = (v) => {
-    if (v == null) return '--'
-    const n = Number(v)
-    if (Number.isInteger(n)) return n.toString()
-    return parseFloat(n.toFixed(4)).toString()
-  }
-
-  const fmtVol = (v) => {
-    if (v == null) return '--'
-    if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿'
-    if (v >= 1e4) return (v / 1e4).toFixed(1) + '万'
-    return v.toLocaleString()
-  }
 
   const dates = klines.map(k => k.date)
   const ohlc = klines.map(k => [k.open, k.close, k.low, k.high])
@@ -121,7 +181,7 @@ function buildChartOption() {
     // Grid 0: K 线
     {
       name: 'K线', type: 'candlestick', xAxisIndex: 0, yAxisIndex: 0, data: ohlc,
-      itemStyle: { color: '#ff453a', color0: '#30d158', borderColor: '#ff453a', borderColor0: '#30d158' }
+      itemStyle: { color: '#ffffff', color0: '#ff453a', borderColor: '#ffffff', borderColor0: '#ff453a' }
     },
     // MA lines on grid 0
     ...(ma[5] ? [{ name: 'MA5', type: 'line', xAxisIndex: 0, yAxisIndex: 0, data: ma[5], smooth: true, symbol: 'none', lineStyle: { width: 1, color: '#ffd60a' } }] : []),
@@ -163,7 +223,7 @@ function buildChartOption() {
     yAxis: yAxes,
     series,
     dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1, 2, 3, 4], start: 50, end: 100 },
+      { type: 'inside', xAxisIndex: [0, 1, 2, 3, 4], start: 0, end: 100 },
       { type: 'slider', xAxisIndex: [0, 1, 2, 3, 4], bottom: '2%', height: 14, borderColor: 'transparent', backgroundColor: 'rgba(255,255,255,0.03)', fillerColor: 'rgba(0,113,227,0.15)', handleStyle: { color: '#0071e3' }, textStyle: { color: '#64748b', fontSize: 10 } }
     ],
     tooltip: {
@@ -179,7 +239,7 @@ function buildChartOption() {
         let html = `<div style="margin-bottom:4px;font-weight:600">${date}</div>`
         if (k) {
           html += `<div style="color:#94a3b8">开 ${fmt(k.open)} 收 ${fmt(k.close)} 高 ${fmt(k.high)} 低 ${fmt(k.low)}</div>`
-          html += `<div style="color:#94a3b8">量 ${fmtVol(k.volume)}</div>`
+          html += `<div style="color:#94a3b8">量 ${formatVol(k.volume)}</div>`
         }
         for (const p of params) {
           if (p.seriesName === 'K线' || p.seriesName === '成交量') continue
@@ -219,7 +279,24 @@ onBeforeUnmount(() => {
 })
 
 onActivated(() => {
-  nextTick(() => chart?.resize())
+  nextTick(() => {
+    if (chartRef.value && !chart) {
+      chart = echarts.init(chartRef.value)
+      renderChart()
+    }
+    if (chartRef.value && chart && !chartRef.value._ro) {
+      const ro = new ResizeObserver(() => chart?.resize())
+      ro.observe(chartRef.value)
+      chartRef.value._ro = ro
+    }
+    chart?.resize()
+  })
+})
+
+onDeactivated(() => {
+  if (chartRef.value?._ro) { chartRef.value._ro.disconnect(); chartRef.value._ro = null }
+  chart?.dispose()
+  chart = null
 })
 </script>
 
@@ -231,6 +308,13 @@ onActivated(() => {
 }
 
 .period-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.period-btns {
   display: flex;
   gap: 6px;
 }
@@ -257,22 +341,51 @@ onActivated(() => {
   border-color: var(--accent);
 }
 
+.chart-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
 .kline-chart {
-  width: 100%;
-  height: 520px;
+  flex: 1;
+  min-width: 0;
+  height: 616px;
   min-height: 360px;
 }
 
-.signals-bar {
+.analysis-sidebar {
+  width: 220px;
+  flex-shrink: 0;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.signals-bar.empty {
+.sidebar-section {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+}
+
+.sidebar-title {
+  font-size: 12px;
+  font-weight: 600;
   color: var(--text-muted);
-  font-size: 13px;
-  padding: 8px 0;
+  margin-bottom: 8px;
+  letter-spacing: 0.5px;
+}
+
+.signal-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.no-signals {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .signal-badge {
@@ -298,27 +411,81 @@ onActivated(() => {
   color: var(--yellow);
 }
 
+.indicator-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ind-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ind-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1px 0;
+}
+
+.ind-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.ind-value {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 1200px) {
+  .analysis-sidebar {
+    max-width: 220px;
+  }
+}
+
 @media (max-width: 1024px) {
+  .chart-layout {
+    flex-direction: column;
+  }
+
   .kline-chart {
-    height: 460px;
+    width: 100%;
+    height: 700px;
     min-height: 360px;
+  }
+
+  .analysis-sidebar {
+    max-width: 100%;
+  }
+
+  .sidebar-section {
+    flex: 1;
+    min-width: 200px;
   }
 }
 
 @media (max-width: 768px) {
   .kline-chart {
-    height: 400px;
+    width: 100%;
+    height: 520px;
     min-height: 340px;
   }
 }
 
 @media (max-width: 480px) {
   .kline-chart {
-    height: 340px;
+    width: 100%;
+    height: 420px;
     min-height: 300px;
   }
 
-  .signals-bar {
+  .signal-list {
     overflow-x: auto;
     flex-wrap: nowrap;
   }

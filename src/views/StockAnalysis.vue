@@ -15,6 +15,22 @@
           <option value="">选择股票</option>
           <option v-for="s in watchlistStore.stocks" :key="s.code" :value="s.code">{{ s.name }} ({{ s.code }})</option>
         </select>
+        <div class="search-box">
+          <input type="search" class="search-input" v-model="searchKw" @input="onSearchInput" @focus="showSearchDrop = true" @compositionstart="isComposing = true" @compositionend="onCompositionEnd" placeholder="搜索代码或名称" />
+          <div v-if="showSearchDrop && searchResults.length" class="search-dropdown">
+            <div v-for="r in searchResults" :key="r.code" class="search-item" @click="onSearchSelect(r)">
+              <span class="si-name">{{ r.name }}</span>
+              <span class="si-code">{{ r.code }}</span>
+            </div>
+          </div>
+          <div v-if="showSearchDrop && searchKw && !searchResults.length && !searchLoading" class="search-dropdown">
+            <div class="search-empty">无搜索结果</div>
+          </div>
+        </div>
+        <div v-if="showSearchDrop" class="search-backdrop" @click="showSearchDrop = false" />
+        <div class="style-switcher">
+          <button v-for="st in styleOptions" :key="st.key" :class="['style-btn', { active: investStyle === st.key }]" @click="onStyleChange(st.key)" :title="st.hint">{{ st.label }}</button>
+        </div>
         <button v-if="currentStock" class="refresh-btn" :disabled="loading" @click="loadAnalysis" title="刷新数据">&#x21bb;</button>
         <span v-if="dataTimestamp && !loading" class="data-time">数据更新于 {{ formatTime(dataTimestamp) }}</span>
       </div>
@@ -98,6 +114,9 @@
             v-else
             :key="selectedCode"
             :score-result="scoreResult"
+            :ai-judge-text="aiJudgeText"
+            :ai-judge-loading="aiJudgeLoading"
+            :ai-judge-error="aiJudgeError"
           />
         </KeepAlive>
       </div>
@@ -112,12 +131,13 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { useWatchlistStore } from '../stores/watchlist.js'
 import { REFRESH_INTERVAL } from '../utils/constants.js'
 import { calcAllIndicators } from '../utils/indicators.js'
 import { calculateScore, getTrendConclusion, getValuationConclusion, getCapitalConclusion } from '../utils/scoring.js'
+import { fetchAIJudge } from '../utils/aiJudge.js'
 import TechnicalPanel from '../components/analysis/TechnicalPanel.vue'
 import FundamentalPanel from '../components/analysis/FundamentalPanel.vue'
 import CapitalFlowPanel from '../components/analysis/CapitalFlowPanel.vue'
@@ -127,6 +147,7 @@ const watchlistStore = useWatchlistStore()
 
 const selectedCode = ref('')
 const activeTab = ref('score')
+const investStyle = ref('short')
 const loading = ref(false)
 const error = ref('')
 
@@ -146,12 +167,25 @@ let stockChangeTimer = null
 let refreshTimer = null
 let loadSeq = 0
 
+const styleOptions = [
+  { key: 'short', label: '短线', hint: '技术面 50% / 基本面 20% / 资金面 30%' },
+  { key: 'mid', label: '中线', hint: '技术面 40% / 基本面 35% / 资金面 25%' },
+  { key: 'long', label: '长线', hint: '技术面 30% / 基本面 45% / 资金面 25%' },
+]
+
 const tabs = [
   { key: 'score', label: '综合评分' },
   { key: 'technical', label: '技术面' },
   { key: 'fundamental', label: '基本面' },
   { key: 'capital', label: '资金面' },
 ]
+
+const searchKw = ref('')
+const searchResults = ref([])
+const searchLoading = ref(false)
+const showSearchDrop = ref(false)
+let searchTimer = null
+let isComposing = false
 
 const currentStock = computed(() => {
   if (!selectedCode.value) return null
@@ -172,6 +206,11 @@ const priceClass = computed(() => {
 
 const scoreResult = ref(null)
 const dataTimestamp = ref(null)
+const lastRefreshTime = ref(null)
+const aiJudgeText = ref('')
+const aiJudgeLoading = ref(false)
+const aiJudgeError = ref('')
+let aiAbortController = null
 
 // 将 margin/northbound/mainForce 注入到 capitalFlow，即使 capitalFlow API 失败也构造空壳对象
 function injectCapitalExtras() {
@@ -197,13 +236,122 @@ function injectCapitalExtras() {
   }
 }
 
-function updateScore() {
+function updateScore(skipAI = false) {
   const ts = techSignals.value
   const fund = fundamental.value
   const cap = capitalFlow.value
   if (!ts.length && !fund) { scoreResult.value = null; return }
   const industry = fund?.latest?.industry || ''
-  scoreResult.value = calculateScore(ts, fund, cap, industry)
+  scoreResult.value = calculateScore(ts, fund, cap, industry, investStyle.value)
+  if (!skipAI) nextTick(() => triggerAIJudge())
+}
+
+function triggerAIJudge() {
+  if (aiAbortController) { aiAbortController.abort(); aiAbortController = null }
+
+  const sr = scoreResult.value
+  const ts = techSignals.value
+  const fund = fundamental.value
+  const kl = klines.value
+  if (!sr || !kl.length) return
+
+  const stock = currentStock.value
+  const bullishCount = ts.filter(s => s.type === 'bullish').length
+  const bearishCount = ts.filter(s => s.type === 'bearish').length
+  const keySignals = ts.slice(0, 5).map(s => s.text).join('；')
+
+  const latest = fund?.latest
+  const fundSummary = latest ? {
+    pe: latest.pe, pb: latest.pb, roe: latest.roe,
+    grossMargin: latest.grossMargin, netMargin: latest.netMargin,
+    revenueGrowth: latest.revenueGrowth, profitGrowth: latest.profitGrowth,
+    debtRatio: latest.debtRatio, industry: latest.industry,
+    ocfPerShare: latest.ocfPerShare,
+  } : null
+
+  const capitalDetails = sr.details.filter(d => d.dimension === '资金面')
+  const mainForceDetail = capitalDetails.find(d => d.name === '主力资金')
+  const marginDetail = capitalDetails.find(d => d.name === '融资融券')
+  const volDetail = capitalDetails.find(d => d.name === '量价趋势')
+
+  const latestClose = kl[kl.length - 1]?.close
+  const close5 = kl.length >= 5 ? kl[kl.length - 5].close : null
+  const close20 = kl.length >= 20 ? kl[kl.length - 20].close : null
+  const change5d = close5 ? ((latestClose - close5) / close5 * 100).toFixed(2) : null
+  const change20d = close20 ? ((latestClose - close20) / close20 * 100).toFixed(2) : null
+
+  // 趋势阶段判断：从 MA 排列 + 价格偏离 + MACD 方向提取
+  const ind = indicators.value
+  const maArr = ind?.ma || {}
+  const len = kl.length
+  const trendContext = (() => {
+    const ma5 = maArr[5]?.[len - 1]
+    const ma10 = maArr[10]?.[len - 1]
+    const ma20 = maArr[20]?.[len - 1]
+    const ma60 = maArr[60]?.[len - 1]
+    if (!ma5 || !ma20) return null
+    const price = latestClose
+    const aboveMa5 = price > ma5
+    const aboveMa20 = price > ma20
+    const aboveMa60 = ma60 ? price > ma60 : null
+    const maAlign = ma5 > ma10 && ma10 > ma20
+    const maDeadCross = ma5 < ma10 && ma10 < ma20
+    const macdHist = ind?.macd?.histogram || []
+    const lastHist = macdHist[len - 1] || 0
+    const prevHist = macdHist[len - 2] || 0
+    const macdDirection = lastHist > prevHist ? '柱线扩大' : lastHist > 0 ? '柱线缩小' : lastHist < prevHist ? '绿柱扩大' : '绿柱缩小'
+
+    let stage = '盘整'
+    if (maAlign && aboveMa5) stage = '上升趋势'
+    else if (maDeadCross && !aboveMa5) stage = '下降趋势'
+    else if (aboveMa20 && !aboveMa5) stage = '上升回调'
+    else if (!aboveMa20 && aboveMa5) stage = '超跌反弹'
+
+    const deviation20 = ((price - ma20) / ma20 * 100).toFixed(1)
+    const deviation60 = ma60 ? ((price - ma60) / ma60 * 100).toFixed(1) : null
+    return { stage, deviation20, deviation60, maAlign, maDeadCross, macdDirection, aboveMa5, aboveMa20, aboveMa60 }
+  })()
+
+  const payload = {
+    code: stock?.code || selectedCode.value,
+    name: stock?.name || '',
+    scoreSummary: {
+      total: sr.total,
+      suggestion: sr.suggestion,
+      confidence: sr.confidence,
+      dimensions: sr.dimensions,
+    },
+    techSummary: {
+      bullishCount, bearishCount, keySignals,
+      score: sr.dimensions.technical.score,
+      max: sr.dimensions.technical.max,
+      details: (sr.details || []).filter(d => d.dimension === '技术面').map(d => `${d.name}${d.desc}`),
+    },
+    fundSummary,
+    capitalSummary: {
+      score: sr.dimensions.capital.score,
+      max: sr.dimensions.capital.max,
+      mainForceDesc: mainForceDetail?.desc,
+      marginDesc: marginDetail?.desc,
+      priceVolumeSignal: volDetail?.desc,
+    },
+    priceAction: { latestClose, change5d, change20d },
+    trendContext,
+    previousAdvice: aiJudgeText.value || null,
+  }
+
+  aiJudgeText.value = ''
+  aiJudgeError.value = ''
+  aiJudgeLoading.value = true
+
+  aiAbortController = fetchAIJudge(payload, {
+    onText: (chunk) => { aiJudgeText.value += chunk },
+    onDone: () => { aiJudgeLoading.value = false },
+    onError: (msg) => {
+      aiJudgeError.value = msg || 'AI 分析暂时不可用'
+      aiJudgeLoading.value = false
+    },
+  })
 }
 
 const trendConclusion = computed(() => getTrendConclusion(techSignals.value))
@@ -259,7 +407,7 @@ function formatChange(pct, amt) {
   return `${sign}${pct.toFixed(2)}%`
 }
 
-async function loadAnalysis() {
+async function loadAnalysis(_manual = true, skipAI = false) {
   const code = selectedCode.value
   const seq = ++loadSeq
   if (!code) {
@@ -348,8 +496,9 @@ async function loadAnalysis() {
     // 统一注入：将融资融券、北向、主力、股东数据合并到 capitalFlow
     injectCapitalExtras()
 
-    updateScore()
+    updateScore(skipAI)
     dataTimestamp.value = new Date()
+    lastRefreshTime.value = Date.now()
 } catch (e) {
     error.value = '数据加载失败: ' + e.message
   } finally {
@@ -380,6 +529,46 @@ async function onPeriodChange(klt) {
   }
 }
 
+function onStyleChange(style) {
+  if (investStyle.value === style) return
+  investStyle.value = style
+  updateScore()
+}
+
+function onSearchInput() {
+  if (isComposing) return
+  clearTimeout(searchTimer)
+  const kw = searchKw.value.trim()
+  if (!kw) { searchResults.value = []; return }
+  searchLoading.value = true
+  searchTimer = setTimeout(async () => {
+    try {
+      const res = await fetch(`/api/stock/search?kw=${encodeURIComponent(kw)}`)
+      const json = await res.json()
+      searchResults.value = json.ok ? (json.data || []).slice(0, 8) : []
+    } catch { searchResults.value = [] }
+    searchLoading.value = false
+  }, 500)
+}
+
+function onCompositionEnd() {
+  isComposing = false
+  onSearchInput()
+}
+
+function onSearchSelect(item) {
+  showSearchDrop.value = false
+  searchKw.value = ''
+  searchResults.value = []
+  // 自动加入自选（如未添加）
+  if (!watchlistStore.stocks.find(s => s.code === item.code)) {
+    watchlistStore.addStock(item.code, item.name)
+    watchlistStore.fetchQuotes()
+  }
+  selectedCode.value = item.code
+  onStockChange()
+}
+
 function onStockChange() {
   loading.value = true
   error.value = ''
@@ -394,6 +583,10 @@ function onStockChange() {
   northboundData.value = null
   mainForceFlow.value = null
   shareholderData.value = null
+  aiJudgeText.value = ''
+  aiJudgeError.value = ''
+  aiJudgeLoading.value = false
+  if (aiAbortController) { aiAbortController.abort(); aiAbortController = null }
 
   clearTimeout(stockChangeTimer)
   stockChangeTimer = setTimeout(loadAnalysis, 200)
@@ -425,14 +618,28 @@ onMounted(() => {
   watchlistStore.startAutoRefresh(REFRESH_INTERVAL)
 
   refreshTimer = setInterval(() => {
-    if (selectedCode.value && !loading.value) loadAnalysis()
+    if (!selectedCode.value || loading.value) return
+    const h = new Date().getHours()
+    const m = new Date().getMinutes()
+    // 盘后（15:30后）30分钟刷新一次，盘中5分钟
+    // 注意：interval 固定5分钟，盘后通过跳过实现降频
+    if (h >= 16 || (h === 15 && m >= 30)) {
+      if (!lastRefreshTime.value || Date.now() - lastRefreshTime.value > 30 * 60 * 1000) {
+        lastRefreshTime.value = Date.now()
+        loadAnalysis(false, true)
+      }
+    } else {
+      loadAnalysis(false, true)
+    }
   }, 5 * 60 * 1000)
 })
 
 onBeforeUnmount(() => {
   watchlistStore.stopAutoRefresh()
   clearTimeout(stockChangeTimer)
+  clearTimeout(searchTimer)
   clearInterval(refreshTimer)
+  if (aiAbortController) { aiAbortController.abort(); aiAbortController = null }
 })
 </script>
 
@@ -508,6 +715,112 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 
+.style-switcher {
+  display: flex;
+  gap: 1px;
+  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  border: 1px solid var(--border);
+}
+
+.style-btn {
+  padding: 5px 10px;
+  width: 45px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.style-btn:hover {
+  color: var(--text-secondary);
+}
+
+.style-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* 搜索框 */
+.search-box {
+  position: relative;
+}
+
+.search-input {
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 13px;
+  width: 150px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+}
+
+.search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.search-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  min-width: 200px;
+  max-height: 240px;
+  overflow-y: auto;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+}
+
+.search-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.search-item:hover {
+  background: var(--bg-surface-alt);
+}
+
+.si-name {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.si-code {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.search-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.search-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+}
+
 .refresh-btn {
   padding: 5px 10px;
   border-radius: var(--radius-sm);
@@ -580,7 +893,7 @@ onBeforeUnmount(() => {
 .diag-card {
   background: var(--bg-surface);
   border-radius: var(--radius-md);
-  padding: 8px 14px;
+  padding: 3px 14px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -671,7 +984,7 @@ onBeforeUnmount(() => {
 
 .skeleton-card {
   flex: 1;
-  height: 44px;
+  height: 36px;
   background: linear-gradient(90deg, var(--bg-surface) 25%, rgba(255,255,255,0.06) 50%, var(--bg-surface) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s ease-in-out infinite;
@@ -680,7 +993,7 @@ onBeforeUnmount(() => {
 }
 
 .skeleton-tabs {
-  height: 40px;
+  height: 42px;
   background: linear-gradient(90deg, var(--bg-surface) 25%, rgba(255,255,255,0.06) 50%, var(--bg-surface) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s ease-in-out infinite;

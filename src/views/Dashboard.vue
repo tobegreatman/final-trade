@@ -107,6 +107,9 @@
                 </div>
                 <div class="signal-card__val">{{ sig.value }}</div>
                 <div class="signal-card__desc">{{ sig.desc }}</div>
+                <div v-if="sig.subSignals" class="signal-card__indices">
+                  <span v-for="sub in sig.subSignals" :key="sub.index" class="index-tag" :class="'tag-' + sub.dir">{{ sub.index }} {{ sub.signal }}</span>
+                </div>
               </div>
               <div class="signal-card__tag" :class="signalTagClass(sig)">
                 {{ sig.bull ? '牛' : sig.bear ? '熊' : '中' }}
@@ -140,7 +143,7 @@
 
       <!-- ===== SECTOR FLOW + RS ROTATION ===== -->
       <section class="sector-flow-section" v-if="analysisStore.sectors.length">
-        <h2 class="panel-title">
+        <h2 class="panel-title collapsible-header" @click="sectorExpanded = !sectorExpanded">
           <span class="title-icon">▦</span>
           行业资金流向 & RS轮动
           <template v-if="analysisStore.rsAvailable && analysisStore.top5Strong.length">
@@ -148,7 +151,9 @@
             <span class="rs-hint">超额收益 vs 上证指数</span>
             <span class="rs-days">{{ analysisStore.rsDays }}日</span>
           </template>
+          <span class="collapse-arrow" :class="{ expanded: sectorExpanded }">▸</span>
         </h2>
+        <div class="collapsible-body" :class="{ collapsed: !sectorExpanded }">
 
         <!-- Row 1: 涨幅TOP10 + 主力净流入TOP5 -->
         <div class="sector-flow-grid">
@@ -241,17 +246,18 @@
             </div>
           </div>
         </div>
+        </div>
       </section>
-
-      <!-- ===== MACRO FACTORS ===== -->
       <section class="macro-section" v-if="analysisStore.macro">
-        <h2 class="panel-title">
+        <h2 class="panel-title collapsible-header" @click="macroExpanded = !macroExpanded">
           <span class="title-icon">◆</span>
           宏观因子
           <span class="macro-score-badge" :class="macroScoreClass">
             {{ analysisStore.macro.macroScore > 0 ? '+' : '' }}{{ analysisStore.macro.macroScore }}分
           </span>
+          <span class="collapse-arrow" :class="{ expanded: macroExpanded }">▸</span>
         </h2>
+        <div class="collapsible-body" :class="{ collapsed: !macroExpanded }">
         <div class="macro-grid">
           <div class="macro-card" v-if="analysisStore.macro.pmi">
             <div class="macro-card__header">
@@ -343,14 +349,22 @@
             <span class="macro-detail__desc">{{ d.desc }}</span>
           </div>
         </div>
+        </div>
       </section>
-
-      <!-- ===== STRATEGY STOCK PICKS ===== -->
       <section class="strategy-section" v-if="judgment">
         <h2 class="panel-title">
           <span class="title-icon">◈</span>
           策略选股建议
           <span v-if="activeStrategy" class="strategy-badge" :class="activeStrategy">{{ strategyLabel }}</span>
+          <span v-if="showStrategyToggle" class="strategy-toggle" @click="toggleStrategy" title="切换策略">
+            {{ neutralTech === 'pullback' ? '回调买入' : '底部确认' }} ⇄
+          </span>
+          <span v-if="activeStrategy" class="mode-switch" @click="toggleScreenerMode">
+            <span class="mode-switch__track" :class="screenerMode">
+              <span class="mode-switch__thumb"></span>
+            </span>
+            <span class="mode-switch__label">{{ screenerMode === 'strict' ? '严' : '宽' }}</span>
+          </span>
         </h2>
 
         <!-- Bear: no buy -->
@@ -360,29 +374,35 @@
         </div>
 
         <template v-else>
-          <!-- Prompt -->
+          <!-- Filter description -->
           <div class="prompt-block">
             <div class="prompt-header">
-              <span class="prompt-label">一句话选股</span>
+              <span class="prompt-label">AI 智能选股条件</span>
               <div class="prompt-actions">
-                <button v-if="isCustomPrompt" class="btn btn-sm btn-ghost" @click="resetPrompt">恢复默认</button>
-                <button v-if="!editingPrompt" class="btn btn-sm btn-ghost" @click="startEditPrompt">编辑条件</button>
-                <button v-else class="btn btn-sm btn-ghost primary" @click="applyCustomPrompt">查询</button>
-                <button class="btn btn-sm btn-ghost" @click="copyText(activePrompt)">复制</button>
+                <button class="btn btn-sm btn-ghost" @click="copyText(keyWordNewQuery)">复制</button>
               </div>
             </div>
-            <pre v-if="!editingPrompt" class="prompt-code">{{ activePrompt }}</pre>
-            <textarea v-else v-model="editPromptText" class="prompt-edit" rows="3" @keydown.enter.prevent="applyCustomPrompt"></textarea>
-            <p class="prompt-hint" v-if="!editingPrompt">
-              匹配 {{ screenStocks.length }} 只 · 点击「编辑条件」自定义选股条件
-            </p>
+            <pre class="prompt-code">{{ keyWordNewQuery }}</pre>
           </div>
+
+          <!-- Parsed conditions -->
+          <div class="conditions-block" v-if="parsedConditions.length">
+            <div class="conditions-tags">
+              <span v-for="c in parsedConditions" :key="c.conditionId" class="condition-tag" :class="{ invalid: !c.isValid }">
+                {{ c.describe }}
+              </span>
+            </div>
+          </div>
+          <p v-if="!aiCookieReady" class="cookie-hint">
+            未配置东财登录态，AI 选股仅解析部分条件。在 server/.env 中填入 EASTMONEY_EMAUTH 可解锁完整解析。
+          </p>
 
           <!-- Stock cards -->
           <div v-if="screenLoading" class="screen-loading">
             <span class="pulse-dot"></span> 正在获取候选股...
           </div>
           <template v-else-if="screenStocks.length">
+            <p class="prompt-hint">匹配 {{ screenStocks.length }} 只 · AI 智能选股结果</p>
             <div class="stock-grid">
               <div
                 v-for="s in screenStocks"
@@ -420,7 +440,8 @@
             <button class="btn btn-sm btn-ghost screen-refresh" @click="fetchScreenStocks">刷新候选</button>
           </template>
           <div v-else class="screen-empty">
-            <span class="screen-empty__text">暂无匹配结果</span>
+            <span v-if="screenError" class="screen-error">{{ screenError }}</span>
+            <span v-else class="screen-empty__text">暂无匹配结果</span>
             <button class="btn btn-sm btn-ghost screen-refresh" @click="fetchScreenStocks">重新检测</button>
           </div>
         </template>
@@ -454,13 +475,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, reactive, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, reactive, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMarketStore } from '../stores/market.js'
 import { useMarketAnalysisStore } from '../stores/marketAnalysis.js'
 import { judgeMarket } from '../utils/marketJudge.js'
 import { PRE_TRADE_CHECKLIST, REFRESH_INTERVAL } from '../utils/constants.js'
-import { getStrategyPreset, buildScreenerPrompt } from '../utils/screenerPrompt.js'
+import { getStrategyPreset, buildStructuredFilter, buildFilterDescription, buildKeyWordNew, buildMarketStateQuery } from '../utils/screenerPrompt.js'
 import { saveJson } from '../utils/storage.js'
 import { useWatchlistStore } from '../stores/watchlist.js'
 import Sparkline from '../components/Sparkline.vue'
@@ -471,83 +492,161 @@ const analysisStore = useMarketAnalysisStore()
 const watchlistStore = useWatchlistStore()
 const showSignals = ref(false)
 const showChecklist = ref(false)
+const sectorExpanded = ref(false)
+const macroExpanded = ref(false)
 
 const checklist = reactive(PRE_TRADE_CHECKLIST.map(label => ({ label, checked: false })))
 
 const checkedCount = computed(() => checklist.filter(c => c.checked).length)
 
 const judgment = computed(() => {
+  if (!marketStore.dataReady) return null
   if (!marketStore.indices || !marketStore.breadth || !marketStore.northbound) return null
-  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound, marketStore.margin, marketStore.breadthHistory, marketStore.limitStats, marketStore.prevStatus, analysisStore.macro?.macroScore)
+  const d = new Date()
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  return judgeMarket(marketStore.indices, marketStore.breadth, marketStore.northbound, marketStore.margin, marketStore.breadthHistory, marketStore.limitStats, marketStore.prevStatus, analysisStore.macro?.macroScore, today)
 })
 
-// 状态惯性：判定完成后持久化状态，下次判定作为惯性参考
-watch(() => judgment.value?.status, (newStatus) => {
-  if (newStatus && newStatus !== marketStore.prevStatus) {
-    marketStore.prevStatus = newStatus
-    saveJson('market_prev_status', newStatus)
+// 状态惯性：判定完成后持久化状态（含增强迟滞参数），下次判定作为惯性参考
+// 监听 status + crossCount 复合值，确保 crossCount 变化时也能持久化
+watch(() => `${judgment.value?.status}:${judgment.value?.hysteresisState?.crossCount ?? ''}`, () => {
+  const newStatus = judgment.value?.status
+  if (!newStatus) return
+  const state = judgment.value.hysteresisState
+  const d = new Date()
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const prevS = typeof marketStore.prevStatus === 'object' ? marketStore.prevStatus?.status : marketStore.prevStatus
+
+  // 状态翻转 或 crossCount 变化 → 都需持久化
+  if (newStatus !== prevS || (state && state.crossCount !== (marketStore.prevStatus?.crossCount || 0))) {
+    const toSave = {
+      status: state?.status || newStatus,
+      date: today,
+      crossCount: state?.crossCount || 0,
+      lastFlipDate: state?.lastFlipDate || null
+    }
+    marketStore.prevStatus = toSave
+    saveJson('market_prev_status', toSave)
   }
 })
 
 // ==================== Strategy Stock Screening ====================
 const screenLoading = ref(false)
 const screenStocks = ref([])
+const screenError = ref('')
+const screenerMode = ref('loose')
+const neutralTech = ref('pullback') // 'pullback' | 'bottomConfirm'
 
 const activeStrategy = computed(() => {
   const s = judgment.value?.status
   if (s === 'bull') return 'trend'
-  if (s === 'bull-lean' || s === 'neutral') return 'pullback'
+  if (s === 'bull-lean') return 'pullback'
+  if (s === 'neutral') return neutralTech.value === 'bottomConfirm' ? 'bottom' : 'pullback'
   return null
 })
 
-const strategyLabel = computed(() => activeStrategy.value === 'trend' ? '趋势突破' : '回调买入')
+const showStrategyToggle = computed(() => judgment.value?.status === 'neutral')
 
-const screenerPrompt = computed(() => {
-  const s = judgment.value?.status
-  if (!s || !activeStrategy.value) return ''
-  return buildScreenerPrompt({ ...getStrategyPreset(s), topSectors: analysisStore.top5Strong || [] }).mobileStatement
+const strategyLabel = computed(() => {
+  if (activeStrategy.value === 'trend') return '趋势突破'
+  if (activeStrategy.value === 'bottom') return '底部确认'
+  return '回调买入'
 })
 
-const customPrompt = ref('')
-const editingPrompt = ref(false)
-const editPromptText = ref('')
-const isCustomPrompt = computed(() => !!customPrompt.value)
-const activePrompt = computed(() => customPrompt.value || screenerPrompt.value)
+const structuredFilter = computed(() => {
+  const s = judgment.value?.status
+  if (!s || !activeStrategy.value) return ''
+  const techOverride = s === 'neutral' && neutralTech.value === 'bottomConfirm' ? 'bottomConfirm' : null
+  const preset = getStrategyPreset(s, screenerMode.value, techOverride)
+  return buildStructuredFilter(preset)
+})
 
-function startEditPrompt() {
-  editPromptText.value = activePrompt.value
-  editingPrompt.value = true
-}
+const keyWordNewQuery = computed(() => {
+  const s = judgment.value?.status
+  if (!s || !activeStrategy.value) return ''
+  const techOverride = s === 'neutral' && neutralTech.value === 'bottomConfirm' ? 'bottomConfirm' : null
+  return buildMarketStateQuery(s, screenerMode.value, techOverride)
+})
 
-function applyCustomPrompt() {
-  if (!editPromptText.value.trim()) return
-  customPrompt.value = editPromptText.value.trim()
-  editingPrompt.value = false
-  fetchScreenStocks()
-}
+const parsedConditions = ref([])
+const aiCookieReady = ref(false)
 
-function resetPrompt() {
-  customPrompt.value = ''
-  editingPrompt.value = false
-  fetchScreenStocks()
+async function checkAICookie() {
+  try {
+    const r = await fetch('/api/stock/xuangu/ai/status')
+    const d = await r.json()
+    aiCookieReady.value = d?.data?.hasCookie === true
+  } catch { /* ignore */ }
 }
+checkAICookie()
+
+const filterDesc = computed(() => {
+  const s = judgment.value?.status
+  if (!s || !activeStrategy.value) return ''
+  const techOverride = s === 'neutral' && neutralTech.value === 'bottomConfirm' ? 'bottomConfirm' : null
+  const preset = getStrategyPreset(s, screenerMode.value, techOverride)
+  return buildFilterDescription(preset)
+})
 
 async function fetchScreenStocks() {
-  if (!activeStrategy.value || !activePrompt.value) return
+  if (!activeStrategy.value) return
   screenLoading.value = true
+  screenError.value = ''
   try {
-    const res = await fetch('/api/stock/xuangu', {
+    const keyWordNew = keyWordNewQuery.value
+    if (!keyWordNew) { screenStocks.value = []; return }
+
+    // 优先使用 AI 选股 API
+    const aiRes = await fetch('/api/stock/xuangu/ai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: activePrompt.value })
+      body: JSON.stringify({ keyWordNew, pageSize: 40 }),
     })
+    const aiJson = await aiRes.json()
+
+    if (aiJson.ok && aiJson.data?.stocks?.length >= 0) {
+      // AI API 返回成功，但如果解析条件过少（total 过大），说明解析不完整
+      const aiTotal = aiJson.data.total || 0
+      const aiConditions = aiJson.data.conditions || []
+      if (aiTotal <= 200 || aiConditions.length >= 3) {
+        screenStocks.value = aiJson.data.stocks
+        parsedConditions.value = aiConditions
+        return
+      }
+    }
+
+    // AI API 失败，回退到结构化 API
+    const filter = structuredFilter.value
+    const s = judgment.value?.status
+    const techOverride = s === 'neutral' && neutralTech.value === 'bottomConfirm' ? 'bottomConfirm' : null
+    const preset = getStrategyPreset(s, screenerMode.value, techOverride)
+    const minesParam = preset.mines.filter(m => m.checked).map(m => m.id).join(',')
+    const res = await fetch(`/api/stock/xuangu/structured?filter=${encodeURIComponent(filter)}&ps=40&mines=${minesParam}`)
     const json = await res.json()
-    if (json.ok) screenStocks.value = json.data.stocks
+    if (json.ok) {
+      screenStocks.value = json.data.stocks
+      parsedConditions.value = []
+    } else {
+      screenStocks.value = []
+      screenError.value = json.error || '选股服务返回异常'
+    }
   } catch (e) {
     console.error('fetchScreenStocks error:', e)
+    screenStocks.value = []
+    screenError.value = '选股服务请求失败，请稍后重试'
   } finally {
     screenLoading.value = false
   }
+}
+
+function toggleScreenerMode() {
+  screenerMode.value = screenerMode.value === 'strict' ? 'loose' : 'strict'
+  nextTick(() => fetchScreenStocks())
+}
+
+function toggleStrategy() {
+  neutralTech.value = neutralTech.value === 'pullback' ? 'bottomConfirm' : 'pullback'
+  nextTick(() => fetchScreenStocks())
 }
 
 watch(activeStrategy, (v) => {
@@ -587,16 +686,22 @@ const indexCards = computed(() => {
   for (const key of ['sh', 'sz', 'cyb']) {
     const d = data[key] || {}
     const q = d.quote || {}
-    const change = q.change ?? 0
     const intra = indexIntraday.value[key]
+    // 优先使用分时图最新点作为实时价格（10秒刷新），回退到 quote（1分钟刷新）
+    const lastTrend = intra?.trends?.length ? intra.trends[intra.trends.length - 1] : null
+    const preClose = intra?.preClose || q.preClose || 0
+    const close = lastTrend ? lastTrend.close : q.close
+    const change = lastTrend && preClose > 0
+      ? (close - preClose) / preClose * 100
+      : (q.change ?? 0)
     cards[key] = {
       name: names[key],
       code: codes[key],
-      close: q.close,
+      close,
       change,
       isUp: change >= 0,
       trends: intra?.trends || [],
-      preClose: intra?.preClose || null
+      preClose
     }
   }
   return cards
@@ -908,7 +1013,7 @@ onBeforeUnmount(() => {
 /* ===== MAIN GRID ===== */
 .main-grid {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: 360px 1fr;
   gap: 20px;
 }
 
@@ -1083,7 +1188,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 0;
+  min-width: 50px;
   transition: flex 0.6s ease;
   white-space: nowrap;
   overflow: hidden;
@@ -1245,6 +1350,33 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
+.signal-card__indices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.signal-card__indices .index-tag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-surface-alt);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.signal-card__indices .index-tag.tag-bull {
+  background: var(--red-dim);
+  color: var(--red);
+}
+.signal-card__indices .index-tag.tag-bear {
+  background: var(--green-dim);
+  color: var(--green);
+}
+.signal-card__indices .index-tag.tag-neutral {
+  background: var(--bg-surface);
+  color: var(--text-muted);
+}
+
 .signal-card__tag {
   font-size: 11px;
   font-weight: 700;
@@ -1344,6 +1476,34 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 24px;
+}
+
+.sector-flow-section .collapsible-header {
+  cursor: pointer;
+  user-select: none;
+}
+
+.collapse-arrow {
+  margin-left: auto;
+  font-size: 14px;
+  color: var(--text-secondary);
+  transition: transform 0.25s;
+}
+
+.collapse-arrow.expanded {
+  transform: rotate(90deg);
+}
+
+.sector-flow-section .collapsible-body {
+  overflow: hidden;
+  transition: max-height 0.3s ease, opacity 0.25s ease;
+  max-height: 800px;
+  opacity: 1;
+}
+
+.sector-flow-section .collapsible-body.collapsed {
+  max-height: 0;
+  opacity: 0;
 }
 .sector-flow-grid {
   display: grid;
@@ -1516,6 +1676,23 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 24px;
+}
+
+.macro-section .collapsible-header {
+  cursor: pointer;
+  user-select: none;
+}
+
+.macro-section .collapsible-body {
+  overflow: hidden;
+  transition: max-height 0.3s ease, opacity 0.25s ease;
+  max-height: 800px;
+  opacity: 1;
+}
+
+.macro-section .collapsible-body.collapsed {
+  max-height: 0;
+  opacity: 0;
 }
 
 .macro-score-badge {
@@ -1757,6 +1934,76 @@ onBeforeUnmount(() => {
   color: var(--accent);
 }
 
+.strategy-badge.bottom {
+  background: rgba(88, 86, 214, 0.15);
+  color: #8b85f2;
+}
+
+.strategy-toggle {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  margin-left: 6px;
+  cursor: pointer;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  transition: all 0.2s;
+}
+
+.strategy-toggle:hover {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+.mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.mode-switch__track {
+  width: 32px;
+  height: 18px;
+  border-radius: 9px;
+  position: relative;
+  transition: background 0.2s;
+  background: var(--accent);
+}
+
+.mode-switch__track.strict {
+  background: var(--red);
+}
+
+.mode-switch__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s;
+}
+
+.mode-switch__track.strict .mode-switch__thumb {
+  transform: translateX(14px);
+}
+
+.mode-switch__label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 14px;
+  text-align: center;
+}
+
 .strategy-empty {
   display: flex;
   align-items: center;
@@ -1816,6 +2063,40 @@ onBeforeUnmount(() => {
   overflow-y: auto;
 }
 
+.conditions-block {
+  margin-bottom: 12px;
+}
+
+.conditions-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.condition-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.condition-tag.invalid {
+  background: rgba(234, 57, 67, 0.1);
+  color: #e74c3c;
+}
+
+.cookie-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 4px 0 8px;
+  padding: 6px 8px;
+  background: rgba(255, 193, 7, 0.08);
+  border-radius: 4px;
+  border-left: 2px solid #ffc107;
+}
+
 .prompt-edit {
   width: 100%;
   background: var(--bg-primary);
@@ -1856,6 +2137,11 @@ onBeforeUnmount(() => {
 .screen-empty__text {
   font-size: 13px;
   color: var(--text-secondary);
+}
+
+.screen-error {
+  font-size: 13px;
+  color: #e74c3c;
 }
 
 .pulse-dot {

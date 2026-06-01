@@ -15,6 +15,7 @@
             v-if="item.trends.length"
             :data="item.trends"
             :positive="item.isUp"
+            :show-area="true"
             :ref-price="item.preClose"
             :auto-width="true"
             :height="68"
@@ -465,6 +466,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .watchlist {
+  max-width: 1400px;
+  margin: 0 auto;
   height: calc(100vh - 52px);
   display: flex;
   flex-direction: column;

@@ -20,8 +20,15 @@ export const useMarketStore = defineStore('market', () => {
   const northbound = ref(loadJson(NB_KEY))
   const margin = ref(loadJson(MARGIN_KEY))
   const limitStats = ref(loadJson(LIMIT_KEY))
-  const prevStatus = ref(loadJson(PREV_STATUS_KEY))
+  const prevStatusObj = loadJson(PREV_STATUS_KEY)
+  const prevStatus = ref(
+    prevStatusObj?.date === todayStr()
+      ? { status: prevStatusObj.status, date: prevStatusObj.date,
+          crossCount: prevStatusObj.crossCount || 0, lastFlipDate: prevStatusObj.lastFlipDate || null }
+      : null
+  )
   const loading = ref(false)
+  const dataReady = ref(false)
 
   async function fetchIndices() {
     try {
@@ -100,10 +107,11 @@ export const useMarketStore = defineStore('market', () => {
     loading.value = true
     try {
       await Promise.all([fetchIndices(), fetchBreadth(), fetchNorthbound(), fetchMargin(), fetchLimitStats()])
+      dataReady.value = true
     } finally {
       loading.value = false
     }
   }
 
-  return { indices, breadth, breadthHistory, northbound, margin, limitStats, prevStatus, loading, fetchIndices, fetchBreadth, fetchNorthbound, fetchMargin, fetchLimitStats, fetchAll }
+  return { indices, breadth, breadthHistory, northbound, margin, limitStats, prevStatus, loading, dataReady, fetchIndices, fetchBreadth, fetchNorthbound, fetchMargin, fetchLimitStats, fetchAll }
 })

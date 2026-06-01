@@ -1,4 +1,5 @@
 import https from 'https'
+import dns from 'dns'
 
 // ==================== 常量 ====================
 const EM_HEADERS = {
@@ -9,8 +10,9 @@ const EM_HEADERS = {
 const FUNDAMENTAL_CACHE_TTL = 30 * 60 * 1000  // 30分钟缓存（含实时PE/PB，需较新）
 const CAPITAL_CACHE_TTL = 5 * 60 * 1000  // 5分钟缓存
 const MARGIN_CACHE_TTL = 30 * 60 * 1000  // 30分钟缓存
-const NORTHBOUND_CACHE_TTL = 60 * 60 * 1000  // 60分钟缓存（季度数据更新慢）
+const NORTHBOUND_CACHE_TTL = 10 * 60 * 1000  // 10分钟缓存（日度数据更新较频）
 const MAIN_FORCE_CACHE_TTL = 5 * 60 * 1000  // 5分钟缓存（日度资金流更新较频）
+const INTRADAY_MF_CACHE_TTL = 3 * 60 * 1000  // 日内分时 3分钟缓存
 const SHAREHOLDER_CACHE_TTL = 60 * 60 * 1000  // 60分钟缓存（季度数据更新慢）
 const CACHE_MAX_SIZE = 200  // 每个缓存最多 200 条，防止内存泄漏
 
@@ -19,6 +21,7 @@ const capitalCache = new Map()
 const marginCache = new Map()
 const northboundCache = new Map()
 const mainForceCache = new Map()
+const intradayMfCache = new Map()
 const shareholderCache = new Map()
 
 // 通用缓存写入：淘汰最旧条目，更新时移动到末尾
@@ -47,18 +50,33 @@ function toSecid(code) {
 
 function fetchJSONviaHttps(url, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers: EM_HEADERS }, (res) => {
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        res.resume()
-        return reject(new Error(`HTTP ${res.statusCode}`))
+    const parsed = new URL(url)
+    // 强制 IPv4，避免东方财富部分域名 IPv6 不通导致 socket hang up
+    dns.resolve4(parsed.hostname, (err, addrs) => {
+      if (err || !addrs?.length) return reject(err || new Error('no IPv4'))
+      const options = {
+        hostname: addrs[0],
+        port: 443,
+        path: parsed.pathname + parsed.search,
+        method: 'GET',
+        headers: { ...EM_HEADERS, Host: parsed.hostname },
+        servername: parsed.hostname,
       }
-      let body = ''
-      res.on('data', c => body += c)
-      res.on('end', () => {
-        try { resolve(JSON.parse(body)) } catch (e) { reject(e) }
+      const req = https.request(options, (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume()
+          return reject(new Error(`HTTP ${res.statusCode}`))
+        }
+        let body = ''
+        res.on('data', c => body += c)
+        res.on('end', () => {
+          try { resolve(JSON.parse(body)) } catch (e) { reject(e) }
+        })
       })
-    }).on('error', reject)
-    req.setTimeout(timeoutMs, () => { req.destroy(new Error('timeout')) })
+      req.on('error', reject)
+      req.setTimeout(timeoutMs, () => { req.destroy(new Error('timeout')) })
+      req.end()
+    })
   })
 }
 
@@ -85,8 +103,8 @@ function getTradeDate() {
 }
 
 /**
- * 从周K价格映射中找报告期最近的收盘价
- * 报告期如 "2025-06-30"，找前后 21 天内最近的周K收盘价
+ * 从日K价格映射中找报告期最近的收盘价
+ * 报告期如 "2025-06-30"，找前后 3 天内最近的日K收盘价
  */
 function findClosestPrice(priceMap, reportDate) {
   const target = new Date(reportDate)
@@ -96,8 +114,8 @@ function findClosestPrice(priceMap, reportDate) {
 
   for (const d of dates) {
     const diff = Math.abs(new Date(d) - target)
-    // 只接受前后 21 天内的匹配（约 3 根周K线）
-    if (diff < minDiff && diff < 21 * 86400000) {
+    // 日K精确匹配：只接受前后 3 天内
+    if (diff < minDiff && diff < 3 * 86400000) {
       minDiff = diff
       closest = priceMap[d]
     }
@@ -134,7 +152,18 @@ function calcTTMEps(items, index, epsMap) {
   const monthDay = item.date.slice(5, 10) // "03-31" / "06-30" / "09-30"
   const prevYear = year - 1
 
-  const prevFyEps = epsMap[`${prevYear}-12-31`]
+  // 查找上一年年报 EPS：优先精确匹配 12-31，回退到该年最后一个报告期
+  let prevFyEps = epsMap[`${prevYear}-12-31`]
+  if (prevFyEps == null) {
+    const prevYearItems = items.filter(it => {
+      const iy = parseInt(it.date.slice(0, 4))
+      return iy === prevYear && it.eps != null
+    })
+    if (prevYearItems.length) {
+      prevFyEps = prevYearItems[prevYearItems.length - 1].eps
+    }
+  }
+
   const prevSameEps = epsMap[`${prevYear}-${monthDay}`]
   if (prevFyEps == null || prevSameEps == null) return null
 
@@ -182,11 +211,11 @@ async function getFundamentalData(code) {
     }
   }
 
-  // 过滤掉空数据，显式按日期倒序排列，取最新12个季度
+  // 过滤掉空数据，显式按日期倒序排列，取最新24个季度（6年，用于分位统计）
   const items = raw
     .filter(d => d.REPORT_DATE)
     .sort((a, b) => new Date(b.REPORT_DATE) - new Date(a.REPORT_DATE))
-    .slice(0, 12)
+    .slice(0, 24)
     .map(parseItem)
 
   // 补充计算: 净利率从利润和营收计算
@@ -230,20 +259,20 @@ async function getFundamentalData(code) {
     items[0].industry = industry
   }
 
-  // 计算历史每期真实 PE/PB：用周 K 线获取报告期对应时点的历史收盘价
+  // 计算历史每期真实 PE/PB：用日 K 线精确匹配报告期对应时点的收盘价
   if (items.length > 1) {
     try {
-      // 取 3 年周 K 线（约 156 根），覆盖所有报告期
-      const wkUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${toSecid(code)}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f56&klt=102&fqt=1&end=${getTradeDate()}&lmt=160`
-      const wkData = await fetchJSON(wkUrl)
-      const wkLines = wkData.data?.klines || []
+      // 取 3 年日 K 线（约 730 根），精确匹配报告期前后 3 天内的收盘价
+      const dkUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${toSecid(code)}&ut=fa5fd1943c7b386f172d6893dbfba10b&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f56&klt=101&fqt=1&end=20500101&lmt=730`
+      const dkData = await fetchJSON(dkUrl)
+      const dkLines = dkData.data?.klines || []
 
-      // 构建日期→价格映射（取每周五收盘价）
+      // 构建日期→收盘价映射（日K精确匹配）
       const priceMap = {}
-      for (const line of wkLines) {
+      for (const line of dkLines) {
         const p = line.split(',')
-        const date = p[0]       // 周K日期（周末日期）
-        const close = +p[2]     // 周收盘价
+        const date = p[0]       // 日K日期
+        const close = +p[2]     // 日收盘价
         priceMap[date] = close
       }
 
@@ -294,13 +323,31 @@ async function getFundamentalData(code) {
 async function getCapitalFlowData(code) {
   const secid = toSecid(code)
 
-  // 取近 30 日 K 线
-  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=${getTradeDate()}&lmt=30`
-  const data = await fetchJSON(url)
-  const klines = (data.data?.klines || []).map(line => {
-    const p = line.split(',')
-    return { date: p[0], open: +p[1], close: +p[2], high: +p[3], low: +p[4], volume: +p[5], amount: +p[6], changePercent: +p[8] }
-  })
+  // 取近 30 日 K 线 — 先尝试东方财富，失败则 fallback 到新浪
+  let klines = []
+  try {
+    const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&ut=fa5fd1943c7b386f172d6893dbfba10b&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=20500101&lmt=30`
+    const data = await fetchJSON(url)
+    klines = (data.data?.klines || []).map(line => {
+      const p = line.split(',')
+      return { date: p[0], open: +p[1], close: +p[2], high: +p[3], low: +p[4], volume: +p[5], amount: +p[6], changePercent: +p[8] }
+    })
+  } catch {
+    // 东方财富接口不通，使用新浪财经 fallback
+    try {
+      const prefix = code.startsWith('6') ? 'sh' : 'sz'
+      const sinaUrl = `https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol=${prefix}${code}&scale=240&ma=no&datalen=30`
+      const raw = await fetchJSON(sinaUrl)
+      if (Array.isArray(raw)) {
+        klines = raw.map((r, i, arr) => {
+          const prev = i > 0 ? +arr[i - 1].close : +r.open
+          return { date: r.day, open: +r.open, close: +r.close, high: +r.high, low: +r.low, volume: +r.volume, amount: 0, changePercent: prev ? (+r.close - prev) / prev * 100 : 0 }
+        })
+      }
+    } catch (e2) {
+      console.error('capital-flow sina fallback error:', e2.message)
+    }
+  }
 
   if (klines.length < 10) {
     return { flows: [], available: false, _source: 'derived', volumeTrend: null, priceVolumeSignal: '数据不足' }
@@ -406,11 +453,39 @@ async function handleCapitalFlow(ctx) {
   }
 }
 
-// ==================== 北向资金数据（季度快照） ====================
+// ==================== 北向资金数据（优先日度，回退季度） ====================
 
 async function getNorthboundData(code) {
   const suffix = code.startsWith('6') ? 'SH' : 'SZ'
   const secucode = `${code}.${suffix}`
+
+  // 优先尝试日度持股数据
+  try {
+    const dailyUrl = `https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_MUTUAL_HOLDSTOCKNDATE_STA_NEW&columns=ALL&source=WEB&client=WEB&sortColumns=TRADE_DATE&sortTypes=-1&pageSize=60&pageNumber=1&filter=(INTERVAL_TYPE="003")(SECUCODE="${secucode}")`
+    const dailyData = await fetchJSON(dailyUrl)
+    const dailyRaw = dailyData.result?.data || []
+    if (dailyRaw.length >= 5) {
+      const items = dailyRaw.map(d => ({
+        date: d.TRADE_DATE?.slice(0, 10) || '',
+        holdShares: d.HOLD_SHARES || 0,
+        holdMarketCap: d.HOLD_MARKET_CAP || 0,
+        freeSharesRatio: d.FREE_SHARES_RATIO || 0,
+        totalSharesRatio: d.TOTAL_SHARES_RATIO || 0,
+        changeRatio: d.HOLDSHARES_CHANGE_RATIO || 0,
+        participantNum: d.PARTICIPANT_NUM || 0,
+        closePrice: d.CLOSE_PRICE || 0,
+      })).reverse()
+
+      const latest = items[items.length - 1] || null
+      const prev = items.length >= 2 ? items[items.length - 2] : null
+
+      return { available: true, data: items, latest, prev, _frequency: 'daily' }
+    }
+  } catch (e) {
+    console.warn('northbound daily fetch failed for', code, e.message)
+  }
+
+  // 回退到季度数据
   const url = `https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_MUTUAL_HOLDSTOCKNDATE_STA_NEW&columns=ALL&source=WEB&client=WEB&sortColumns=TRADE_DATE&sortTypes=-1&pageSize=50&pageNumber=1&filter=(INTERVAL_TYPE="001")(SECUCODE="${secucode}")`
   const data = await fetchJSON(url)
 
@@ -431,12 +506,7 @@ async function getNorthboundData(code) {
   const latest = items[items.length - 1] || null
   const prev = items.length >= 2 ? items[items.length - 2] : null
 
-  return {
-    available: true,
-    data: items,
-    latest,
-    prev,
-  }
+  return { available: true, data: items, latest, prev, _frequency: 'quarterly' }
 }
 
 async function handleNorthbound(ctx) {
@@ -543,8 +613,19 @@ async function getMainForceFlowData(code) {
   const secid = toSecid(code)
   const fields1 = 'f1,f2,f3,f7'
   const fields2 = 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65'
-  const url = `https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=60&klt=101&secid=${secid}&fields1=${fields1}&fields2=${fields2}&ut=b2884a393a59ad64002292a3e90d46a5`
-  const data = await fetchJSON(url)
+
+  // push2his.eastmoney.com 在部分网络环境不可达，优先使用 emdatah5 代理接口
+  const emdataUrl = `https://emdatah5.eastmoney.com/dc/ZJLX/getDBHistoryData?secid=${secid}&fields1=${fields1}&fields2=${fields2}&klt=101&lmt=60`
+  const pushUrl = `https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=60&klt=101&secid=${secid}&fields1=${fields1}&fields2=${fields2}&ut=b2884a393a59ad64002292a3e90d46a5`
+
+  let data
+  try {
+    data = await fetchJSON(emdataUrl, 10000)
+  } catch {
+    try { data = await fetchJSON(pushUrl, 10000) } catch { data = null }
+  }
+
+  if (!data) return { data: [], available: false }
 
   const klines = data.data?.klines || []
   if (!klines.length) return { data: [], available: false }
@@ -586,20 +667,147 @@ async function getMainForceFlowData(code) {
   }
 }
 
+// ==================== 主力资金日内分时（东方财富分钟级数据） ====================
+
+async function getMainForceIntradayData(code) {
+  const secid = toSecid(code)
+  const fields1 = 'f1,f2,f3,f7'
+  const fields2 = 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65'
+  const pushUrl = `https://push2.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=0&klt=1&secid=${secid}&fields1=${fields1}&fields2=${fields2}&ut=b2884a393a59ad64002292a3e90d46a5&_=${Date.now()}`
+  const emdataUrl = `https://emdatah5.eastmoney.com/dc/ZJLX/getDBHistoryData?secid=${secid}&fields1=${fields1}&fields2=${fields2}&klt=1&lmt=0&_=${Date.now()}`
+
+  let data
+  try {
+    data = await fetchJSON(pushUrl, 12000)
+  } catch {
+    try { data = await fetchJSON(emdataUrl, 12000) } catch { data = null }
+  }
+
+  if (!data) return null
+
+  try {
+    const klines = data.data?.klines || []
+    if (!klines.length) return null
+
+    const items = klines.map(line => {
+      const p = line.split(',')
+      return {
+        time: p[0],
+        mainNetInflow: +p[1],
+        smallNetInflow: +p[2],
+        mediumNetInflow: +p[3],
+        largeNetInflow: +p[4],
+        superLargeNetInflow: +p[5],
+      }
+    })
+
+    // 校验：必须是分钟级数据（time 含空格，如 "2026-05-25 09:31"）且为当日
+    const lastTime = items[items.length - 1].time
+    const todayStr = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10)
+    if (!lastTime.includes(' ') || !lastTime.startsWith(todayStr)) {
+      return null
+    }
+
+    // 分钟数据本身就是累计值，最后一条即今日合计
+    const last = items[items.length - 1]
+    const aggregated = {
+      mainNetInflow: last.mainNetInflow,
+      smallNetInflow: last.smallNetInflow,
+      mediumNetInflow: last.mediumNetInflow,
+      largeNetInflow: last.largeNetInflow,
+      superLargeNetInflow: last.superLargeNetInflow,
+    }
+
+    return { items, aggregated }
+  } catch (e) {
+    console.error('intraday-mf error:', e.message)
+    return null
+  }
+}
+
 async function handleMainForceFlow(ctx) {
   try {
     const code = validateCode(ctx)
     if (!code) return
 
-    const cached = mainForceCache.get(code)
-    if (cached && Date.now() - cached.ts < MAIN_FORCE_CACHE_TTL) {
+    // 日度数据缓存
+    let result
+    const dailyCached = mainForceCache.get(code)
+    if (dailyCached && Date.now() - dailyCached.ts < MAIN_FORCE_CACHE_TTL) {
       cacheTouch(mainForceCache, code)
-      ctx.body = ok(cached.data)
-      return
+      result = { ...dailyCached.data }
+    } else {
+      result = await getMainForceFlowData(code)
+      cacheSet(mainForceCache, code, { data: result, ts: Date.now() })
     }
 
-    const result = await getMainForceFlowData(code)
-    cacheSet(mainForceCache, code, { data: result, ts: Date.now() })
+    // 日内分时数据（独立缓存，失败不影响日度缓存）
+    let intraday = null
+    const intraCached = intradayMfCache.get(code)
+    if (intraCached && Date.now() - intraCached.ts < (intraCached.ttl || INTRADAY_MF_CACHE_TTL)) {
+      intraday = intraCached.data
+    } else {
+      intraday = await getMainForceIntradayData(code)
+      if (!intraday) {
+        // 重试一次
+        intraday = await getMainForceIntradayData(code)
+      }
+      if (intraday) {
+        // 稀疏数据（<5条）用短TTL，避免开盘初期过早缓存
+        const ttl = intraday.items.length < 5 ? 30 * 1000 : INTRADAY_MF_CACHE_TTL
+        cacheSet(intradayMfCache, code, { data: intraday, ts: Date.now(), ttl })
+      }
+    }
+
+    if (intraday && result.latest) {
+      result.intraday = intraday
+      const agg = intraday.aggregated
+      const dailyData = result.data || []
+      const todayStr = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10)
+
+      // 用近3日 pct/amount 平均比率估算今日 pct
+      const recent3 = dailyData.slice(-3).filter(d => d.mainNetInflow !== 0 && d.mainNetPct != null)
+      let estimatedPct = result.latest.mainNetPct
+      if (recent3.length) {
+        const avgRatio = recent3.reduce((s, d) => s + (d.mainNetPct / d.mainNetInflow), 0) / recent3.length
+        if (Number.isFinite(avgRatio)) {
+          estimatedPct = Math.round(agg.mainNetInflow * avgRatio * 100) / 100
+        }
+      }
+
+      // 更新 latest：日内金额 + 估算 pct，日期也更新为今日
+      result.latest = { ...result.latest, ...agg, mainNetPct: estimatedPct, date: todayStr }
+
+      // 更新 summary 含今日：最近4天 + 今日 = 新5日
+      const last4 = dailyData.slice(-4)
+      const last4Pcts = last4.map(d => d.mainNetPct).filter(p => p != null)
+      if (last4Pcts.length === 4) {
+        const all5Pcts = [...last4Pcts, estimatedPct]
+        result.summary = {
+          ...result.summary,
+          mainNetAvgPct5: Math.round(all5Pcts.reduce((a, b) => a + b, 0) / 5 * 100) / 100,
+          mainNetSum5: last4.reduce((s, d) => s + d.mainNetInflow, 0) + agg.mainNetInflow,
+        }
+      }
+
+      // 追加/更新今日到 data 数组（日度 API 可能已含当日，需去重）
+      const todayEntry = {
+        date: todayStr,
+        mainNetInflow: agg.mainNetInflow,
+        mainNetPct: estimatedPct,
+        smallNetInflow: agg.smallNetInflow,
+        mediumNetInflow: agg.mediumNetInflow,
+        largeNetInflow: agg.largeNetInflow,
+        superLargeNetInflow: agg.superLargeNetInflow,
+      }
+      const lastDaily = dailyData[dailyData.length - 1]
+      if (lastDaily && lastDaily.date === todayStr) {
+        result.data = [...dailyData.slice(0, -1), todayEntry]
+      } else {
+        result.data = [...dailyData, todayEntry]
+      }
+    }
+
     ctx.body = ok(result)
   } catch (e) {
     console.error('main-force-flow error:', e.message)

@@ -118,22 +118,31 @@
 
     <!-- Output -->
     <section class="output-section" v-if="canGenerate">
-      <h2 class="section-title">筛选条件输出</h2>
-
-      <!-- Mobile: 一句话选股 -->
+      <div class="output-header" style="display:flex;justify-content:space-between;align-items:center">
+        <h2 class="section-title" style="margin:0">筛选条件</h2>
+        <button class="btn btn-sm btn-primary" @click="queryXuangu" :disabled="queryLoading">
+          {{ queryLoading ? '查询中...' : '查询' }}
+        </button>
+      </div>
       <div class="output-block">
         <div class="output-header">
-          <span class="output-type">手机端 · 一句话选股</span>
-          <div class="output-actions">
-            <button class="btn btn-sm btn-primary" @click="queryXuangu" :disabled="queryLoading">
-              {{ queryLoading ? '查询中...' : '查询' }}
-            </button>
-            <button class="btn btn-sm btn-ghost" @click="copy(mobileStatement)">复制</button>
-          </div>
+          <span class="output-type">AI 智能选股条件</span>
+          <button class="btn btn-sm btn-ghost" @click="copy(keyWordNewText)">复制</button>
         </div>
-        <pre class="output-code">{{ mobileStatement }}</pre>
-        <p class="output-hint">粘贴到东方财富 App「一句话选股」或 xuangu.eastmoney.com</p>
+        <pre class="output-code">{{ keyWordNewText }}</pre>
       </div>
+
+      <!-- Parsed conditions -->
+      <div class="conditions-block" v-if="parsedConditions.length">
+        <div class="conditions-tags">
+          <span v-for="c in parsedConditions" :key="c.conditionId" class="condition-tag" :class="{ invalid: !c.isValid }">
+            {{ c.describe }}
+          </span>
+        </div>
+      </div>
+      <p v-if="!aiCookieReady" class="cookie-hint">
+        未配置东财登录态，AI 选股仅解析部分条件。在 server/.env 中填入 EASTMONEY_EMAUTH 可解锁完整解析。
+      </p>
 
       <!-- Query results -->
       <div v-if="queryLoading" class="query-loading">
@@ -156,47 +165,29 @@
             </div>
             <div class="stock-card__price">
               <span class="stock-card__val">{{ s.price?.toFixed(2) }}</span>
-              <span class="stock-card__chg" :class="s.chgAmt >= 0 ? 'up' : 'down'">
-                {{ s.chgAmt >= 0 ? '+' : '' }}{{ s.chgAmt?.toFixed(2) }}%
+              <span class="stock-card__chg" :class="s.change >= 0 ? 'up' : 'down'">
+                {{ s.change >= 0 ? '+' : '' }}{{ s.change?.toFixed(2) }}%
               </span>
             </div>
             <div class="stock-card__meta">
               <span>PE {{ s.pe?.toFixed(1) }}</span>
-              <span>PB {{ s.pb?.toFixed(2) }}</span>
               <span>换手 {{ s.turnover?.toFixed(1) }}%</span>
+              <span v-if="s.debtRatio != null">负债 {{ s.debtRatio?.toFixed(0) }}%</span>
+            </div>
+            <div class="stock-card__flow" v-if="s.mainFlow != null">
+              <span class="flow-label">主力</span>
+              <span :class="s.mainFlow >= 0 ? 'up' : 'down'">{{ fmtFlow(s.mainFlow) }}</span>
+            </div>
+            <div class="stock-card__extra" v-if="s.pledgeRatio != null || s.goodwillRatio != null">
+              <span v-if="s.pledgeRatio != null">质押 {{ s.pledgeRatio?.toFixed(1) }}%</span>
+              <span v-if="s.goodwillRatio != null">商誉 {{ s.goodwillRatio?.toFixed(1) }}%</span>
             </div>
           </div>
         </div>
-        <button class="btn btn-sm btn-ghost query-refresh" @click="queryXuangu">刷新结果</button>
       </template>
-      <div v-else-if="queryFetched && !queryResults.length" class="query-empty">
+      <div v-else-if="queryFetched" class="query-empty">
         <span>暂无匹配结果</span>
         <button class="btn btn-sm btn-ghost" @click="queryXuangu">重新查询</button>
-      </div>
-
-      <!-- Manual conditions -->
-      <div v-if="manualConditions.length" class="output-block">
-        <div class="output-header">
-          <span class="output-type output-type--warn">需 PC 端 / 手动设置</span>
-        </div>
-        <div class="manual-list">
-          <div v-for="(c, i) in manualConditions" :key="i" class="manual-item">
-            <span class="manual-num">{{ i + 1 }}</span>
-            <div>
-              <span class="manual-label">{{ c.label }}</span>
-              <span class="manual-where">{{ c.where }}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- PC formula -->
-      <div class="output-block">
-        <div class="output-header">
-          <span class="output-type">PC 端公式代码</span>
-          <button class="btn btn-sm btn-ghost" @click="copy(pcFormula)">复制</button>
-        </div>
-        <pre class="output-code">{{ pcFormula }}</pre>
       </div>
 
       <!-- F10 reminders -->
@@ -217,7 +208,7 @@
 import { ref, reactive, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { MINE_SWEEPER_ITEMS, FUNDAMENTAL_DEFAULTS, PROSPERITY_OPTIONS, TECH_SIGNAL_OPTIONS } from '../utils/constants.js'
-import { buildScreenerPrompt } from '../utils/screenerPrompt.js'
+import { buildStructuredFilter, buildFilterDescription, buildKeyWordNew } from '../utils/screenerPrompt.js'
 import { useWatchlistStore } from '../stores/watchlist.js'
 
 const router = useRouter()
@@ -245,19 +236,15 @@ const fundFields = [
 const minesChecked = computed(() => mines.filter(m => m.checked).length)
 const canGenerate = computed(() => minesChecked.value >= 5)
 
-const promptResult = computed(() => {
-  if (!canGenerate.value) return { mobileStatement: '', manualConditions: [], pcFormula: '' }
-  return buildScreenerPrompt({
+const filterDesc = computed(() => {
+  if (!canGenerate.value) return ''
+  return buildFilterDescription({
     mines,
     fundamentals: { ...fundamentals },
     prosperity: selectedProsperity.value,
     tech: selectedTech.value,
   })
 })
-
-const mobileStatement = computed(() => promptResult.value.mobileStatement)
-const manualConditions = computed(() => promptResult.value.manualConditions)
-const pcFormula = computed(() => promptResult.value.pcFormula)
 
 const f10Reminders = computed(() => {
   return mines.filter(m => !m.auto && m.checked)
@@ -266,26 +253,69 @@ const f10Reminders = computed(() => {
 const queryResults = ref([])
 const queryLoading = ref(false)
 const queryFetched = ref(false)
+const parsedConditions = ref([])
+const aiCookieReady = ref(false)
+
+async function checkAICookie() {
+  try {
+    const r = await fetch('/api/stock/xuangu/ai/status')
+    const d = await r.json()
+    aiCookieReady.value = d?.data?.hasCookie === true
+  } catch { /* ignore */ }
+}
+checkAICookie()
+
+const keyWordNewText = computed(() => {
+  if (!canGenerate.value) return ''
+  return buildKeyWordNew({
+    mines,
+    fundamentals: { ...fundamentals },
+    prosperity: selectedProsperity.value,
+    tech: selectedTech.value,
+  })
+})
 
 async function queryXuangu() {
-  if (!mobileStatement.value) return
   queryLoading.value = true
   queryFetched.value = false
   try {
-    const res = await fetch('/api/stock/xuangu', {
+    const keyWordNew = keyWordNewText.value
+    if (!keyWordNew) { queryResults.value = []; return }
+
+    // 优先使用 AI 选股 API
+    const aiRes = await fetch('/api/stock/xuangu/ai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: mobileStatement.value })
+      body: JSON.stringify({ keyWordNew, pageSize: 40 }),
     })
-    const json = await res.json()
-    if (json.ok) {
-      queryResults.value = json.data.stocks || []
-    } else {
-      queryResults.value = []
+    const aiJson = await aiRes.json()
+
+    if (aiJson.ok && aiJson.data?.stocks?.length >= 0) {
+      const aiTotal = aiJson.data.total || 0
+      const aiConditions = aiJson.data.conditions || []
+      if (aiTotal <= 200 || aiConditions.length >= 3) {
+        queryResults.value = aiJson.data.stocks
+        parsedConditions.value = aiConditions
+        queryFetched.value = true
+        return
+      }
     }
+
+    // AI API 失败，回退到结构化 API
+    const filter = buildStructuredFilter({
+      mines,
+      fundamentals: { ...fundamentals },
+      prosperity: selectedProsperity.value,
+      tech: selectedTech.value,
+    })
+    const res = await fetch(`/api/stock/xuangu/structured?filter=${encodeURIComponent(filter)}&ps=40&mines=${mines.filter(m => m.checked).map(m => m.id).join(',')}`)
+    const json = await res.json()
+    queryResults.value = json.ok ? json.data.stocks : []
+    parsedConditions.value = []
     queryFetched.value = true
   } catch (e) {
     console.error('queryXuangu error:', e)
+    queryResults.value = []
   } finally {
     queryLoading.value = false
   }
@@ -298,6 +328,13 @@ function goToStock(code, name) {
 
 function toggleLayer(n) {
   openLayer.value = openLayer.value === n ? 0 : n
+}
+
+function fmtFlow(v) {
+  if (v == null) return '--'
+  const abs = Math.abs(v)
+  const str = abs >= 10000 ? (abs / 10000).toFixed(1) + '亿' : abs.toFixed(0) + '万'
+  return (v >= 0 ? '+' : '-') + str
 }
 
 function copy(text) {
@@ -834,7 +871,51 @@ function copy(text) {
   border-radius: 3px;
 }
 
-.query-refresh {
-  margin-top: 4px;
+.stock-card__extra {
+  display: flex;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.stock-card__extra span {
+  background: var(--bg-surface-alt, rgba(255, 255, 255, 0.03));
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.conditions-block {
+  margin-bottom: 12px;
+}
+
+.conditions-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.condition-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.condition-tag.invalid {
+  background: rgba(234, 57, 67, 0.1);
+  color: #e74c3c;
+}
+
+.cookie-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 4px 0 8px;
+  padding: 6px 8px;
+  background: rgba(255, 193, 7, 0.08);
+  border-radius: 4px;
+  border-left: 2px solid #ffc107;
 }
 </style>

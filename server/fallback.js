@@ -170,11 +170,15 @@ export async function fetchIndicesIntradayFallback() {
   return result
 }
 
-// 个股 120 日 K 线
-export async function fetchStockKlineFallback(code) {
+// 个股 120 日 K 线（支持 day/week/month 周期）
+export async function fetchStockKlineFallback(code, klt = '101') {
   const tc = toTc(code)
-  const data = await fetchJSON(`https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${tc},day,,,120,qfq`)
-  const raw = data.data?.[tc]?.qfqday || data.data?.[tc]?.day || []
+  const period = klt === '102' ? 'week' : klt === '103' ? 'month' : 'day'
+  const periodKey = klt === '102' ? 'qfqweek' : klt === '103' ? 'qfqmonth' : 'qfqday'
+  const fallbackKey = klt === '102' ? 'week' : klt === '103' ? 'month' : 'day'
+  const url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${tc},${period},,,120,qfq`
+  const data = await fetchJSON(url)
+  const raw = data.data?.[tc]?.[periodKey] || data.data?.[tc]?.[fallbackKey] || []
   const klines = raw.map(k => ({
     date: k[0], open: +k[1], close: +k[2], high: +k[3], low: +k[4],
     volume: +k[5], amount: +(k[6] || 0), turnover: +(k[7] || 0)

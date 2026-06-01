@@ -9,7 +9,7 @@
 | 大盘状态 | 八维判据自动判定市场牛熊（含宏观因子），加权评分 + 状态惯性 + 行业资金流向 & RS 轮动 + 策略选股建议 + 长窗口速判 + 交易前检查清单 |
 | 股票池 | 搜索添加自选股，实时行情自动刷新，6 周期 K 线图，分时走势，基本面数据 |
 | 个股分析 | 综合评分（技术面40/基本面42/资金面29 三维度加权）+ 技术指标信号 + 估值分位 + 财务趋势 + 主力资金 + 北向资金 + 融资融券 + 股东户数筹码趋势 |
-| 选股筛选 | 四层漏斗（排雷→基本面→景气度→技术信号），生成东方财富一句话选股条件，支持 RS 行业过滤 |
+| 选股筛选 | 四层漏斗（排雷→基本面→景气度→技术信号），AI 自然语言选股（主用）+ 结构化选股 API（回退），支持 RS 行业过滤 |
 | 仓位计算 | ATR 动态止损/仓位/盈亏比计算，持仓管理，行业集中度监控 |
 | 交易日志 | 交易全生命周期记录，平仓复盘评分，绩效统计，违规分析 |
 | 策略速查 | 10 章节交易规则参考手册，随时查阅 |
@@ -30,7 +30,7 @@ final-trade/
 ├── vite.config.js              # Vite 配置，/api 代理到 localhost:3001
 ├── server/
 │   ├── package.json            # 后端依赖
-│   ├── index.js                # Koa API 代理（含北向资金双源容错）
+│   ├── index.js                # Koa API 代理（含北向资金双源容错 + AI智能选股 + 结构化选股回退）
 │   ├── analysis.js             # 分析引擎（宏观评分/板块RS/估值分析）
 │   ├── stockAnalysis.js        # 个股分析引擎（基本面/资金流/主力资金/融资融券/北向资金/股东户数）
 │   └── fallback.js             # 腾讯/新浪备用数据源
@@ -50,12 +50,7 @@ final-trade/
 │   │   ├── indicators.js       # 技术指标计算（MA/MACD/KDJ/RSI/BOLL + 6类信号生成）
 │   │   ├── scoring.js          # 个股评分引擎（三维度加权 技术40/基本面42/资金29 + 行业感知PE/PB/负债率阈值）
 │   │   ├── position.js         # ATR 仓位/止损/盈亏比计算
-│   ├── utils/
-│   │   ├── marketJudge.js      # 八维大盘判定算法（v7，前7维）
-│   │   ├── marketCycle.js      # 五维周期定位引擎（10阶段）
-│   │   ├── screenerPrompt.js   # 四层漏斗选股 prompt 生成器（Dashboard + Screener 共用）
-│   │   ├── storage.js          # localStorage 统一读写工具
-│   │   └── constants.js        # 交易规则常量 + 全局刷新间隔
+│   │   ├── screenerPrompt.js   # 四层漏斗选股生成器（AI keyWordNew + 结构化 filter + 可读描述，Dashboard + Screener 共用）
 │   │   ├── storage.js          # localStorage 统一读写工具
 │   │   └── constants.js        # 交易规则常量 + 全局刷新间隔
 │   ├── components/
@@ -141,7 +136,9 @@ cd server && node index.js   # 启动后端，配合静态文件服务使用
 | GET | `/api/stock/batch/quotes` | 批量实时行情 |
 | GET | `/api/stock/search` | 搜索股票（代码/名称/拼音） |
 | GET | `/api/stock/screen` | 策略选股 — 备用（趋势突破/回调买入） |
-| POST | `/api/stock/xuangu` | 一句话选股 — 主用（自然语言条件，调用东方财富 xuangu API） |
+| GET | `/api/stock/xuangu/structured` | 结构化选股 — 回退（结构化 filter 条件，调用东方财富 xuangu API） |
+| POST | `/api/stock/xuangu/ai` | AI 智能选股 — 主用（自然语言 keyWordNew，东财 AI API 解析） |
+| GET | `/api/stock/xuangu/ai/status` | AI 选股登录态状态（cookie 是否已配置） |
 | GET | `/api/stock-analysis/fundamental` | 个股基本面（PE/PB/ROE/营收/净利/毛利率/负债率/每股现金流/市值/行业），30分钟缓存 |
 | GET | `/api/stock-analysis/capital-flow` | 个股资金流向（量价分析），5分钟缓存 |
 | GET | `/api/stock-analysis/main-force-flow` | 个股主力资金流向（近60日），5分钟缓存 |
@@ -174,16 +171,18 @@ cd server && node index.js   # 启动后端，配合静态文件服务使用
 
 ### 策略选股建议
 
-根据八维判据结果自动匹配策略，复用选股筛选页面的**四层漏斗逻辑**生成自然语言选股条件（由 `screenerPrompt.js` 共用工具函数生成），自动注入 RS 强势行业过滤条件，通过东方财富 xuangu API 实时查询：
+根据八维判据结果自动匹配策略，复用选股筛选页面的**四层漏斗逻辑**生成自然语言 keyWordNew 查询（由 `screenerPrompt.js` 的 `buildKeyWordNew()` 生成），优先通过东财 AI 自然语言选股 API 实时查询，AI 解析不完整时自动回退到结构化选股 API：
 
 | 市场状态 | 推荐策略 | 选股条件 |
 |---------|---------|---------|
-| 牛市 | 趋势突破 | 排雷8项 + ROE>12%, 营收/利润增速>10%, 负债率<60%, PE 5-40, 市值≥50亿, 放量突破+MACD金叉+均线多头 |
-| 偏多 | 回调买入 | 排雷8项 + ROE>12%, PE 5-40, 负债率<60%, 市值≥50亿, 接近MA20+缩量 |
-| 震荡 | 回调买入 | 排雷8项 + ROE>12%, PE 5-30, 负债率<60%, 现金流+, 市值≥50亿, 接近MA20+缩量 |
+| 牛市 | 趋势突破 | 排雷8项 + ROE≥8~12%, 营收/利润增速≥5~10%, 负债率≤60~65%, PE 3~60, 市值≥30~50亿, MACD金叉+均线多头 + 机构增持 |
+| 偏多 | 回调买入 | 排雷8项 + ROE≥8~12%, 营收/利润增速≥0~5%, PE 3~60, 负债率≤60~65%, 市值≥30~50亿, 均线多头+量能收缩 |
+| 震荡 | 回调买入/底部确认 | 排雷8项 + ROE≥8~12%, 营收/利润增速≥0~5%, PE 3~50, 负债率≤60~65%, 市值≥30~50亿, 业绩超预期 + 均线多头+量缩（可切换底部确认） |
 | 偏空/熊市 | 空仓观望 | 不生成选股建议 |
 
-系统自动生成一句话选股条件并实时查询，用户可编辑条件自定义选股。Dashboard 和 Screener 页面共用同一套 prompt 生成逻辑。
+系统自动生成 keyWordNew 并实时查询，支持严/宽两种选股模式。牛市自动启用"机构增持"景气度，震荡市启用"业绩超预期"。震荡市支持切换"底部确认"策略。Dashboard 和 Screener 页面共用同一套查询生成逻辑（`buildKeyWordNew()` + `buildMarketStateQuery()`）。
+
+**登录态管理**: AI 选股 API 在无登录态时只能解析 2-3 个条件。通过 `server/.env` 配置 `EASTMONEY_EMAUTH` cookie 值，后端自动注入请求头。前端通过 `/api/stock/xuangu/ai/status` 检测配置状态，未配置时显示提示。
 
 ### 行业资金流向 & 板块 RS 轮动
 
@@ -274,7 +273,9 @@ Dashboard 涨跌家数使用独立的 30 秒刷新定时器（`BREADTH_INTERVAL`
 - 9:00 后使用当前日期参数查询（获取盘中实时数据）
 - 东方财富 push2 系列域名从服务器端不可达时，涨跌家数走东方财富 ulist API（push2.eastmoney.com，单请求获取沪A+深A+北交所涨跌平家数），个股数据走腾讯备用
 - 北向资金使用 datacenter-web RPT_MUTUAL_DEALAMT 报表（主用），失败时自动回退证券时报 stcn 数据源
-- 选股优先使用 xuangu API（`POST /api/stock/xuangu`），不可用时回退本地筛选（`GET /api/stock/screen`）
+- 选股三级回退：AI 自然语言选股（`POST /api/stock/xuangu/ai`，主用）→ 结构化选股 API（`GET /api/stock/xuangu/structured`，回退）→ 本地筛选（`GET /api/stock/screen`，兜底）
+- AI 选股 API 在无 `EASTMONEY_EMAUTH` cookie 时只能解析 2-3 个条件，前端检测 total>200 且 conditions<3 时自动回退
+- AI 选股结果以 keyWordNew 为缓存 key，TTL 5 分钟
 - 个股分析数据均来自东方财富 datacenter-web API：基本面(RPT_VALUEANALYSIS_DET + ZYZBAjaxNew)、融资融券(RPTA_WEB_RZRQ_GGMX)、北向资金(RPT_MUTUAL_HOLDSTOCKNDATE_STA_NEW)、主力资金(个股资金流向)、股东户数(RPT_HOLDERNUM_DET)
 - 服务端 LRU 缓存（Map 插入序 + 读取序更新），基本面/融资融券 30 分钟、资金流/主力资金 5 分钟、北向资金/股东户数 60 分钟
 

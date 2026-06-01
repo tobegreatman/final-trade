@@ -81,7 +81,7 @@ function draw() {
   for (let i = 0; i < candleCount; i++) {
     const k = klines[i]
     const up = k.close >= k.open
-    const color = up ? '#ff453a' : '#30d158'
+    const color = up ? '#ffffff' : '#ff453a'
     const x = pad.left + i * candleW + gap
     const cx = x + bodyW / 2
 
