@@ -1,4 +1,5 @@
 import { MARKET_STATUS } from './constants.js'
+import { calcVolatilityMeasure, detectDivergenceV2 } from './divergence.js'
 
 /**
  * 八维大盘判定算法 v7
@@ -18,7 +19,7 @@ import { MARKET_STATUS } from './constants.js'
  */
 
 // ==================== 权重配置 ====================
-const W = { macd: 1.0, breadth: 1.5, rsi: 1.0, margin: 1.2, volumePrice: 1.3, northbound: 1.5, limitStats: 1.3 }
+const W = { macd: 1.0, breadth: 1.5, rsi: 1.0, margin: 1.2, volumePrice: 1.3, northbound: 1.5, limitStats: 1.3, macro: 0.5 }
 const W_STRONG = 2.0
 const CORE_DIM_COUNT = 7  // 核心技术七维（不含宏观辅助）
 
@@ -123,163 +124,9 @@ function linearSlope(arr) {
   return (n * sxy - sx * sy) / (n * sx2 - sx * sx)
 }
 
-// ==================== 波动率辅助 ====================
-function calcVolatilityMeasure(closes, period = 14) {
-  if (closes.length < period + 1) return 0
-  let sum = 0
-  for (let i = closes.length - period; i < closes.length; i++) {
-    sum += Math.abs(closes[i] - closes[i - 1])
-  }
-  return sum / period
-}
-
-// ==================== 背离检测（v7.1 增强） ====================
-
-/**
- * 多尺度极值检测
- * 使用多种窗口大小扫描极值，合并重叠区域，计算置信分数
- * @param {number[]} arr - 数据序列
- * @param {'min'|'max'} type - 极值类型
- * @param {number[]} windows - 半窗口大小列表，默认 [2, 3, 5]
- * @returns {{ idx: number, val: number, score: number }[]}
- */
-function findLocalExtremaMultiScale(arr, type, windows = [2, 3, 5]) {
-  const maxW = Math.max(...windows)
-  const allCandidates = []
-
-  // 各窗口分别检测
-  for (const w of windows) {
-    for (let i = w; i < arr.length - w; i++) {
-      let isExtreme = true
-      for (let j = i - w; j <= i + w; j++) {
-        if (j === i) continue
-        if (type === 'min' && arr[j] < arr[i]) { isExtreme = false; break }
-        if (type === 'max' && arr[j] > arr[i]) { isExtreme = false; break }
-      }
-      if (isExtreme) {
-        allCandidates.push({ idx: i, val: arr[i], window: w })
-      }
-    }
-  }
-
-  if (allCandidates.length === 0) return []
-
-  // 按 idx 排序
-  allCandidates.sort((a, b) => a.idx - b.idx)
-
-  // 合并重叠区域：在 maxW 范围内的极值归为一组
-  const merged = []
-  let group = [allCandidates[0]]
-
-  for (let i = 1; i < allCandidates.length; i++) {
-    if (allCandidates[i].idx - group[group.length - 1].idx <= maxW) {
-      group.push(allCandidates[i])
-    } else {
-      merged.push(mergeExtremaGroup(group, type, windows.length))
-      group = [allCandidates[i]]
-    }
-  }
-  merged.push(mergeExtremaGroup(group, type, windows.length))
-
-  // 最小间距过滤：相邻极值间距 < 3 时保留更极端的
-  const filtered = [merged[0]]
-  for (let i = 1; i < merged.length; i++) {
-    const prev = filtered[filtered.length - 1]
-    if (merged[i].idx - prev.idx < 3) {
-      // 保留更极端的
-      const keepOld = type === 'min' ? prev.val <= merged[i].val : prev.val >= merged[i].val
-      if (!keepOld) filtered[filtered.length - 1] = merged[i]
-    } else {
-      filtered.push(merged[i])
-    }
-  }
-
-  return filtered
-}
-
-/** 合并一组重叠极值候选：取最极端值，score = 检测到该极值的窗口数 / 总窗口数 */
-function mergeExtremaGroup(group, type, totalWindows) {
-  // 找最极端的值
-  let best = group[0]
-  for (let i = 1; i < group.length; i++) {
-    if (type === 'min' && group[i].val < best.val) best = group[i]
-    if (type === 'max' && group[i].val > best.val) best = group[i]
-  }
-
-  // 统计有多少窗口在此位置附近检测到了极值
-  const nearbyIdx = new Set()
-  for (const c of group) {
-    if (Math.abs(c.idx - best.idx) <= 1) nearbyIdx.add(c.window)
-  }
-  // 也检查最极端值自身被哪些窗口直接检测到
-  for (const c of group) {
-    if (c.idx === best.idx) nearbyIdx.add(c.window)
-  }
-
-  return {
-    idx: best.idx,
-    val: best.val,
-    score: Math.max(1, nearbyIdx.size) / totalWindows
-  }
-}
-
-/** 幅度过滤阈值：两极值间价格变化需达到日均波动的倍数 */
-const AMPLITUDE_FACTOR = 0.5
-/** 时间衰减系数：半衰期 ~14 bar */
-const TIME_DECAY_LAMBDA = 0.05
-
-/**
- * 增强背离检测（多尺度 + 幅度过滤 + 时间衰减）
- * @param {number[]} prices - 价格序列（与指标等长且时间对齐）
- * @param {number[]} indicator - 指标序列
- * @returns {{ type: 'bullish'|'bearish', confidence: number } | null}
- */
-function detectDivergenceV2(prices, indicator) {
-  if (prices.length < 10 || indicator.length < 10) return null
-  const len = Math.min(prices.length, indicator.length)
-  if (len < 10) return null
-  const p = prices.slice(-len)
-  const ind = indicator.slice(-len)
-
-  const volatility = calcVolatilityMeasure(p, Math.min(14, len - 1))
-
-  const pMins = findLocalExtremaMultiScale(p, 'min')
-  const pMaxs = findLocalExtremaMultiScale(p, 'max')
-
-  // 底背离：价格更低 + 指标更高
-  if (pMins.length >= 2) {
-    const a = pMins[pMins.length - 2], b = pMins[pMins.length - 1]
-    const priceSwing = Math.abs(b.val - a.val)
-    if (b.val < a.val && ind[b.idx] > ind[a.idx]) {
-      if (volatility > 0 && priceSwing >= volatility * AMPLITUDE_FACTOR) {
-        const extremaScore = (a.score + b.score) / 2
-        const ampFactor = Math.min(1.0, priceSwing / volatility)
-        const barsSince = (len - 1) - b.idx
-        const timeDecay = Math.exp(-TIME_DECAY_LAMBDA * barsSince)
-        const confidence = Math.max(0.1, Math.min(1.0, extremaScore * ampFactor * timeDecay))
-        return { type: 'bullish', confidence }
-      }
-    }
-  }
-
-  // 顶背离：价格更高 + 指标更低
-  if (pMaxs.length >= 2) {
-    const a = pMaxs[pMaxs.length - 2], b = pMaxs[pMaxs.length - 1]
-    const priceSwing = Math.abs(b.val - a.val)
-    if (b.val > a.val && ind[b.idx] < ind[a.idx]) {
-      if (volatility > 0 && priceSwing >= volatility * AMPLITUDE_FACTOR) {
-        const extremaScore = (a.score + b.score) / 2
-        const ampFactor = Math.min(1.0, priceSwing / volatility)
-        const barsSince = (len - 1) - b.idx
-        const timeDecay = Math.exp(-TIME_DECAY_LAMBDA * barsSince)
-        const confidence = Math.max(0.1, Math.min(1.0, extremaScore * ampFactor * timeDecay))
-        return { type: 'bearish', confidence }
-      }
-    }
-  }
-
-  return null
-}
+// ==================== 背离检测已抽取至 divergence.js ====================
+// calcVolatilityMeasure, findLocalExtremaMultiScale, detectDivergenceV2
+// 均从 ./divergence.js 导入
 
 // ==================== 主判定函数 ====================
 export function judgeMarket(indices, breadth, northbound, margin, breadthHistory, limitStats, prevStatus, macroScore, todayStr) {
@@ -315,12 +162,13 @@ export function judgeMarket(indices, breadth, northbound, margin, breadthHistory
     const abs = Math.abs(macroScore)
     const dir = macroScore > 0 ? 'bull' : 'bear'
     const desc = macroScore > 0 ? '宏观环境偏暖，支持多头' : '宏观环境偏冷，抑制做多情绪'
-    addSignal(mk('宏观因子', `${macroScore > 0 ? '+' : ''}${macroScore.toFixed(1)}分`, dir, abs * 0.5, desc))
+    addSignal(mk('宏观因子', `${macroScore > 0 ? '+' : ''}${macroScore.toFixed(1)}分`, dir, abs * W.macro, desc))
   }
 
   const hysteresisResult = determineStatus(bullW, bearW, prev, todayStr)
   const status = hysteresisResult.status
-  const confirmed = (bullW >= 3.5 && bullW > bearW) || (bearW >= 3.5 && bearW > bullW)
+  // confirmed 与状态等级对齐：偏多及以上 = 多头确认，偏空及以下 = 空头确认
+  const confirmed = BULL_SET.has(status) || BEAR_SET.has(status)
   const longWindow = checkLongWindow(quote, ma, idx.klines || [], breadth)
 
   return {
@@ -425,32 +273,49 @@ function judgeRSI(klines) {
       `RSI顶背离，价格新高但RSI=${current.toFixed(1)}未新高，调整风险，置信度${(div.confidence * 100).toFixed(0)}%`, 'bearish')
   }
 
-  // 多头判定
-  if (current > 55 && trendingUp) {
+  // 多头判定（从强到弱，无重叠区间）
+  const hadOversold = rsi5.some(r => r < 30)
+  const hadOverbought = rsi5.some(r => r > 70)
+
+  if (current >= 60 && trendingUp) {
+    // RSI≥60 且上行 → 强势多头（合并原 >55+trendingUp 和 ≥60 两个条件）
     return mk('RSI', `强势 ${current.toFixed(0)}`, 'bull', W.rsi,
       `RSI(14)=${current.toFixed(1)}，持续上行，多头动量充足`)
   }
-  if (current >= 60) {
+  if (current >= 60 && !trendingUp) {
+    // RSI≥60 但停止上行 → 偏强但动量减弱
     return mk('RSI', `偏强 ${current.toFixed(0)}`, 'bull', W.rsi * 0.7,
       `RSI(14)=${current.toFixed(1)}，高位运行，多头格局`)
   }
-  const hadOversold = rsi5.some(r => r < 30)
+  if (current > 55 && trendingUp) {
+    // RSI 55~60 且上行 → 多头偏强
+    return mk('RSI', `偏强 ${current.toFixed(0)}`, 'bull', W.rsi * 0.7,
+      `RSI(14)=${current.toFixed(1)}，上行中，多头格局`)
+  }
   if (hadOversold && current > 45 && current > prev) {
+    // 近5日曾超卖，现回升 → 反弹信号
     return mk('RSI', `超卖回升 ${current.toFixed(0)}`, 'bull', W.rsi,
       `RSI从超卖区回升至${current.toFixed(1)}，反弹信号`)
   }
 
-  // 空头判定
+  // 空头判定（从强到弱，无重叠区间）
   if (current < 35 && !trendingUp) {
+    // RSI<35 且下行 → 强势空头
     return mk('RSI', `弱势 ${current.toFixed(0)}`, 'bear', W.rsi,
       `RSI(14)=${current.toFixed(1)}，持续下行，空头动量主导`)
   }
-  if (current < 40 && !trendingUp) {
+  if (current < 35 && trendingUp) {
+    // RSI<35 但开始上行 → 偏弱但动量改善
+    return mk('RSI', `偏弱 ${current.toFixed(0)}`, 'bear', W.rsi * 0.7,
+      `RSI(14)=${current.toFixed(1)}，低位但开始回升`)
+  }
+  if (current >= 35 && current < 40 && !trendingUp) {
+    // RSI 35~40 且下行 → 偏弱
     return mk('RSI', `偏弱 ${current.toFixed(0)}`, 'bear', W.rsi * 0.7,
       `RSI(14)=${current.toFixed(1)}，低位运行，偏空格局`)
   }
-  const hadOverbought = rsi5.some(r => r > 70)
   if (hadOverbought && current < 55 && current < prev) {
+    // 近5日曾超买，现回落 → 调整信号
     return mk('RSI', `超买回落 ${current.toFixed(0)}`, 'bear', W.rsi,
       `RSI从超买区回落至${current.toFixed(1)}，调整信号`)
   }
@@ -470,18 +335,22 @@ function judgeBreadth(breadth, breadthHistory) {
     return mk('涨跌家数', '数据不足', 'neutral', W.breadth, '')
   }
 
-  // 趋势判断（用 3 日移动均值对比，比单日更稳健）
+  // 趋势判断（近3日均值 vs 前10日均值，滑动窗口更稳健）
   let trend = ''
   if (breadthHistory && breadthHistory.length >= 3) {
     const histRatios = breadthHistory
       .filter(h => h && h.down > 0)
       .map(h => h.up / h.down)
-    if (histRatios.length >= 2) {
+    if (histRatios.length >= 3) {
       const recent3 = histRatios.slice(-3)
-      const olderRatios = histRatios.slice(0, -1)
-      const olderAvg = olderRatios.length > 0 ? olderRatios.reduce((a, b) => a + b, 0) / olderRatios.length : ratio
-      const improvement = ratio > olderAvg * 1.1
-      const deterioration = ratio < olderAvg * 0.9
+      const recent3Avg = recent3.reduce((a, b) => a + b, 0) / recent3.length
+      // 前10日均值（排除最近3日，至少需要2日数据）
+      const olderRatios = histRatios.slice(0, -3)
+      const olderAvg = olderRatios.length >= 2
+        ? olderRatios.slice(-10).reduce((a, b) => a + b, 0) / olderRatios.slice(-10).length
+        : recent3Avg  // 历史数据不足时退回与自身比较（不产生趋势标记）
+      const improvement = recent3Avg > olderAvg * 1.1
+      const deterioration = recent3Avg < olderAvg * 0.9
       if (improvement) trend = ' ↑改善'
       else if (deterioration) trend = ' ↓恶化'
     }
@@ -491,17 +360,25 @@ function judgeBreadth(breadth, breadthHistory) {
     return mk('涨跌家数', `${up}/${down} (${ratio.toFixed(1)})${trend}`, 'bull', W_STRONG,
       `上涨${up}家/下跌${down}家，比值${ratio.toFixed(1)}，市场广度极强${trend}`)
   }
-  if (ratio >= 1.5) {
+  if (ratio >= 1.8) {
     return mk('涨跌家数', `${up}/${down} (${ratio.toFixed(1)})${trend}`, 'bull', W.breadth,
       `上涨${up}家/下跌${down}家，比值${ratio.toFixed(1)}，市场偏强${trend}`)
+  }
+  if (ratio >= 1.5) {
+    return mk('涨跌家数', `${up}/${down} (${ratio.toFixed(1)})${trend}`, 'bull', W.breadth * 0.7,
+      `上涨${up}家/下跌${down}家，比值${ratio.toFixed(1)}，略偏多但未达牛熊分界(1.8)${trend}`)
   }
   if (ratio <= 0.5) {
     return mk('涨跌家数', `${up}/${down} (${ratio.toFixed(1)})${trend}`, 'bear', W_STRONG,
       `上涨${up}家/下跌${down}家，比值${ratio.toFixed(1)}，市场广度极弱${trend}`)
   }
-  if (ratio < 0.67) {
+  if (ratio <= 0.55) {
     return mk('涨跌家数', `${up}/${down} (${ratio.toFixed(1)})${trend}`, 'bear', W.breadth,
       `上涨${up}家/下跌${down}家，比值${ratio.toFixed(1)}，市场偏弱${trend}`)
+  }
+  if (ratio <= 0.67) {
+    return mk('涨跌家数', `${up}/${down} (${ratio.toFixed(1)})${trend}`, 'bear', W.breadth * 0.7,
+      `上涨${up}家/下跌${down}家，比值${ratio.toFixed(1)}，略偏空但未达牛熊分界(0.55)${trend}`)
   }
   return mk('涨跌家数', `${up}/${down} (${ratio.toFixed(1)})${trend}`, 'neutral', W.breadth,
     `涨跌比${ratio.toFixed(1)}，无明显偏向${trend}`)
@@ -647,41 +524,46 @@ function synthMultiIndex(indices, judgeFn) {
   const bulls = results.filter(r => r.signal.bull)
   const bears = results.filter(r => r.signal.bear)
   const neutrals = results.filter(r => !r.signal.bull && !r.signal.bear)
+  // 优先上证为主信号源，缺失时取第一个有效指数并标记降级
   const primary = results.find(r => r.key === 'sh') || results[0]
+  const isPrimaryFallback = primary.key !== 'sh'
 
   // 多指数方向综合 + 权重调整
   let dir, weight, desc
   const agreement = `(${results.map(r => `${r.name}${r.signal.bull ? '多' : r.signal.bear ? '空' : '中'}`).join('/')})`
 
+  // 上证缺失时额外折扣系数（数据源不够可靠）
+  const fallbackFactor = isPrimaryFallback ? 0.8 : 1.0
+
   if (bulls.length === results.length) {
     // 全部看多
     dir = 'bull'
-    weight = primary.signal.weight * 1.2
+    weight = primary.signal.weight * 1.2 * fallbackFactor
     desc = `${primary.signal.desc} ${agreement}`
   } else if (bears.length === results.length) {
     // 全部看空
     dir = 'bear'
-    weight = primary.signal.weight * 1.2
+    weight = primary.signal.weight * 1.2 * fallbackFactor
     desc = `${primary.signal.desc} ${agreement}`
   } else if (bulls.length >= 2) {
     // 多数看多
     dir = 'bull'
-    weight = primary.signal.weight
+    weight = primary.signal.weight * fallbackFactor
     desc = `${primary.signal.desc} ${agreement}`
   } else if (bears.length >= 2) {
     // 多数看空
     dir = 'bear'
-    weight = primary.signal.weight
+    weight = primary.signal.weight * fallbackFactor
     desc = `${primary.signal.desc} ${agreement}`
   } else if (bulls.length === 1 && bears.length === 1 && neutrals.length >= 1) {
-    // 一多一空一中 → 跟随上证
+    // 一多一空一中 → 跟随主信号源
     dir = primary.signal.bull ? 'bull' : (primary.signal.bear ? 'bear' : 'neutral')
-    weight = primary.signal.weight * 0.7
+    weight = primary.signal.weight * 0.7 * fallbackFactor
     desc = `指数分化，信号弱化 ${agreement}`
   } else {
     // 完全分化或全中性
     dir = 'neutral'
-    weight = primary.signal.weight * 0.7
+    weight = primary.signal.weight * 0.7 * fallbackFactor
     desc = `指数方向不一，信号弱化 ${agreement}`
   }
 
@@ -698,21 +580,25 @@ function synthMultiIndex(indices, judgeFn) {
       index: r.name,
       signal: r.signal.value,
       dir: r.signal.bull ? 'bull' : (r.signal.bear ? 'bear' : 'neutral')
-    }))
+    })),
+    hint: sig.dimension === '量价配合' ? '20日趋势' : null
   }
 }
 
-// ==================== 北向资金（活跃度 + 成交额趋势方向） ====================
+// ==================== 北向资金（活跃度 + 量价联合方向分析） ====================
 function judgeNorthbound(northbound) {
   if (!northbound || northbound.length < 5) return mk('北向资金', '数据不足', 'neutral', W.northbound, '')
 
   // nfAmt 是成交额（恒正），通过 5 日/20 日均量比判断活跃度
   const amts = northbound.slice(0, Math.min(20, northbound.length)).map(d => d.nfAmt || 0)
-  const amt5 = amts.slice(0, 5)
-  const amt20 = amts
+  const amt5 = amts.slice(0, 5)  // 最近5天
+  const amtRest = amts.slice(5)  // 第6~20天（不含最近5天，避免窗口重叠）
   const avg5 = amt5.reduce((a, b) => a + b, 0) / 5
-  const avg20 = amt20.reduce((a, b) => a + b, 0) / amt20.length
-  const ratio = avg20 !== 0 ? avg5 / avg20 : 1
+  // 当数据不足15天（除最近5天外 < 10天），退回包含式计算
+  const avgRest = amtRest.length >= 10
+    ? amtRest.reduce((a, b) => a + b, 0) / amtRest.length
+    : (amts.length > 0 ? amts.reduce((a, b) => a + b, 0) / amts.length : 1)
+  const ratio = avgRest !== 0 ? avg5 / avgRest : 1
   const changePct = (ratio - 1) * 100
   const latest = northbound[0]?.nfAmt || 0
 
@@ -720,19 +606,44 @@ function judgeNorthbound(northbound) {
   const slope = linearSlope(amt5)
   const trendDir = slope > 0 ? '↑' : slope < 0 ? '↓' : '→'
 
+  // 量价联合分析：提取近 5 日大盘涨跌幅（sciRate/sscRate）
+  const recent5 = northbound.slice(0, 5)
+  const rates = recent5.map(d => d.sciRate || 0).filter(v => v !== 0)
+  const avgRate = rates.length >= 3 ? rates.reduce((a, b) => a + b, 0) / rates.length : null
+  const hasRateData = avgRate !== null
+
+  // 放量场景
   if (ratio >= 1.2) {
     const direction = slope > 0 ? '且持续升温' : slope < 0 ? '但有所降温' : ''
+    // 量价联合修正：放量+大盘下跌 → 疑似净卖出，翻转为 bear
+    if (hasRateData && avgRate < -0.5) {
+      return mk('北向资金', `活跃${trendDir} ${fmtAmtWan(latest)}`, 'bear', W_STRONG,
+        `近5日均成交${fmtAmtWan(avg5)}，增幅${changePct.toFixed(1)}%，但同期大盘暴跌${avgRate.toFixed(2)}%，疑似净卖出`)
+    }
+    if (hasRateData && avgRate < -0.2) {
+      return mk('北向资金', `活跃${trendDir} ${fmtAmtWan(latest)}`, 'bear', W.northbound,
+        `近5日均成交${fmtAmtWan(avg5)}，增幅${changePct.toFixed(1)}%，但同期大盘下跌${avgRate.toFixed(2)}%，疑似净卖出`)
+    }
+    const rateHint = hasRateData && avgRate > 0.3 ? '，配合大盘强势上涨' : hasRateData && avgRate > 0 ? '，大盘同步上涨' : ''
     return mk('北向资金', `活跃${trendDir} ${fmtAmtWan(latest)}`, 'bull', ratio >= 1.4 ? W_STRONG : W.northbound,
-      `近5日均成交${fmtAmtWan(avg5)}，高于20日均${fmtAmtWan(avg20)}，增幅${changePct.toFixed(1)}%，${direction}`)
+      `近5日均成交${fmtAmtWan(avg5)}，高于20日均${fmtAmtWan(avgRest)}，增幅${changePct.toFixed(1)}%，${direction}${rateHint}`)
   }
+
+  // 缩量场景
   if (ratio <= 0.8) {
     const direction = slope < 0 ? '且持续萎缩' : slope > 0 ? '但有所回暖' : ''
+    // 量价联合修正：缩量+大盘大涨 → 北向缺席上涨行情
+    if (hasRateData && avgRate > 0.3) {
+      return mk('北向资金', `退缩${trendDir} ${fmtAmtWan(latest)}`, 'bear', W.northbound * 0.7,
+        `近5日均成交${fmtAmtWan(avg5)}，降幅${Math.abs(changePct).toFixed(1)}%，但同期大盘上涨${avgRate.toFixed(2)}%，北向缺席行情`)
+    }
+    const rateHint = hasRateData && avgRate < -0.3 ? '，配合大盘走弱' : ''
     return mk('北向资金', `退缩${trendDir} ${fmtAmtWan(latest)}`, 'bear', ratio <= 0.6 ? W_STRONG : W.northbound,
-      `近5日均成交${fmtAmtWan(avg5)}，低于20日均${fmtAmtWan(avg20)}，降幅${Math.abs(changePct).toFixed(1)}%，${direction}`)
+      `近5日均成交${fmtAmtWan(avg5)}，低于20日均${fmtAmtWan(avgRest)}，降幅${Math.abs(changePct).toFixed(1)}%，${direction}${rateHint}`)
   }
 
   return mk('北向资金', `${fmtAmtWan(latest)}`, 'neutral', W.northbound,
-    `近5日均${fmtAmtWan(avg5)}，20日均${fmtAmtWan(avg20)}，偏差${changePct >= 0 ? '+' : ''}${changePct.toFixed(1)}%`)
+    `近5日均${fmtAmtWan(avg5)}，20日均${fmtAmtWan(avgRest)}，偏差${changePct >= 0 ? '+' : ''}${changePct.toFixed(1)}%`)
 }
 
 // ==================== 涨跌停（市场情绪，并行评分 v7.2） ====================
@@ -833,12 +744,12 @@ function judgeLimitStats(limitStats) {
     }
   }
 
-  // === 汇总判定（含惩罚系数） ===
+  // === 汇总判定（含惩罚系数，双向削弱使信号向中性回归） ===
   let net = bullPts - bearPts
-  // 板块集中度过高时削弱看多信号
-  if (concentrationPenalty < 1.0 && net > 0) net = Math.round(net * concentrationPenalty)
-  // 自然涨停率过低时削弱看多信号
-  if (naturalPenalty < 1.0 && net > 0) net = Math.round(net * naturalPenalty)
+  // 板块集中度过高 → 信号质量不足，将 |net| 往 0 方向压缩
+  if (concentrationPenalty < 1.0) net = Math.round(net * concentrationPenalty)
+  // 自然涨停率过低 → 含金量不足，同样双向压缩
+  if (naturalPenalty < 1.0) net = Math.round(net * naturalPenalty)
 
   const val = `涨停${limitUp} 跌停${limitDown} 封板${sealPct}%`
 
@@ -897,7 +808,18 @@ function determineStatus(bullW, bearW, prevState, todayStr) {
   }
 
   // 跨方向反转（多↔空）：需要阈值 + 连续确认 + 冷却期
-  if ((BULL_SET.has(prevStatus) && BEAR_SET.has(raw)) || (BEAR_SET.has(prevStatus) && BULL_SET.has(raw))) {
+  // 包括：牛→熊、熊→牛、中性→极端（neutral→bull/bear 也需保护）
+  const prevIsBull = BULL_SET.has(prevStatus)
+  const prevIsBear = BEAR_SET.has(prevStatus)
+  const prevIsNeutral = prevStatus === 'neutral'
+  const rawIsBull = BULL_SET.has(raw)
+  const rawIsBear = BEAR_SET.has(raw)
+
+  const isCrossDir = (prevIsBull && rawIsBear) || (prevIsBear && rawIsBull)
+  // neutral → 极端方向视为跨方向翻转（需冷却期和确认）
+  const isNeutralToExtreme = prevIsNeutral && (rawIsBull || rawIsBear)
+
+  if (isCrossDir || isNeutralToExtreme) {
     // 冷却期检查
     if (lastFlipDate && todayStr) {
       const flipDate = new Date(lastFlipDate)
@@ -908,7 +830,7 @@ function determineStatus(bullW, bearW, prevState, todayStr) {
       }
     }
 
-    // 阈值检查（1.0 → 1.5）
+    // 阈值检查
     if (Math.abs(net) < CROSS_DIR_THRESHOLD) {
       return { status: prevStatus, crossCount: 0, lastFlipDate }
     }
@@ -916,7 +838,6 @@ function determineStatus(bullW, bearW, prevState, todayStr) {
     // 连续确认：需要连续 CONFIRM_DAYS 天满足条件
     const newCrossCount = (prevState?.crossCount || 0) + 1
     if (newCrossCount < CONFIRM_DAYS) {
-      // 首日满足但未达确认天数 → 保持旧状态，累加计数
       return { status: prevStatus, crossCount: newCrossCount, lastFlipDate }
     }
 
@@ -924,9 +845,12 @@ function determineStatus(bullW, bearW, prevState, todayStr) {
     return { status: finalStatus, crossCount: 0, lastFlipDate: todayStr || null }
   }
 
-  // 进出中性：需要 |net| ≥ 1.5（不变）
-  if (Math.abs(net) < NEUTRAL_THRESHOLD) {
-    return { status: prevStatus, crossCount: 0, lastFlipDate }
+  // 极端方向 → 中性：只需 |net| ≥ 1.5 即可进入中性（宽松）
+  if ((prevIsBull || prevIsBear) && raw === 'neutral') {
+    if (Math.abs(net) < NEUTRAL_THRESHOLD) {
+      return { status: prevStatus, crossCount: 0, lastFlipDate }
+    }
+    return { status: finalStatus, crossCount: 0, lastFlipDate }
   }
 
   return { status: finalStatus, crossCount: 0, lastFlipDate }
@@ -940,19 +864,26 @@ function checkLongWindow(quote, ma, klines, breadth) {
   conditions.push({ label: `指数收盘价(${close.toFixed(0)}) > MA60(${ma60.toFixed(0)})`, pass: cond1 })
 
   let cond2 = false
-  if (klines.length >= 63) {
+  // 需要至少 62 根 K 线才能计算 3 天前的 MA60（62 = 60 + 2 天偏移）
+  if (klines.length >= 62) {
     const closes = klines.map(k => k.close)
     const ma60_3days = []
     for (let i = 0; i < 3; i++) {
-      const s = closes.length - 60 - (2 - i)
-      ma60_3days.push(closes.slice(s, s + 60).reduce((a, b) => a + b, 0) / 60)
+      const end = closes.length - (2 - i)  // 从后往前取：latest, -1, -2
+      const start = end - 60
+      if (start >= 0) {
+        ma60_3days.push(closes.slice(start, end).reduce((a, b) => a + b, 0) / (end - start))
+      } else {
+        // 数据不足以计算这一天的 MA60
+        break
+      }
     }
-    cond2 = ma60_3days[2] > ma60_3days[1] && ma60_3days[1] > ma60_3days[0]
+    cond2 = ma60_3days.length === 3 && ma60_3days[2] > ma60_3days[1] && ma60_3days[1] > ma60_3days[0]
   }
   conditions.push({ label: 'MA60连续3日拐头向上', pass: cond2 })
 
-  const cond3 = breadth && breadth.up && breadth.down ? (breadth.up / breadth.down >= 1.5) : false
-  conditions.push({ label: `涨跌比 ≥ 1.5 (当前${breadth?.up && breadth?.down ? (breadth.up / breadth.down).toFixed(1) : '?'})`, pass: cond3 })
+  const cond3 = breadth && breadth.up && breadth.down ? (breadth.up / breadth.down >= 1.8) : false
+  conditions.push({ label: `涨跌比 ≥ 1.8 (当前${breadth?.up && breadth?.down ? (breadth.up / breadth.down).toFixed(1) : '?'})`, pass: cond3 })
 
   const allPass = cond1 && cond2 && cond3
   return { conditions, allPass, message: allPass ? '多头窗口已开启' : '多头窗口未开启' }

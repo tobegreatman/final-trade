@@ -9,6 +9,8 @@
           <div class="score-summary">
             <div class="suggestion" :style="{ color: scoreResult.suggestionColor }">
               {{ scoreResult.suggestion }}
+              <span v-if="scoreDelta.direction === 'up' && scoreDelta.delta >= 10" class="score-arrow up">↑{{ scoreDelta.delta }}</span>
+              <span v-if="scoreDelta.direction === 'down' && Math.abs(scoreDelta.delta) >= 10" class="score-arrow down">↓{{ Math.abs(scoreDelta.delta) }}</span>
             </div>
             <div class="confidence">
               {{ '★'.repeat(scoreResult.confidenceStars) }}{{ '☆'.repeat(5 - scoreResult.confidenceStars) }}
@@ -28,34 +30,26 @@
         </div>
       </div>
 
-      <!-- 明细：技术面 + 基本面 + 资金面 三列 -->
+      <!-- 评分趋势迷你图 + 行业排名 -->
+      <div v-if="scoreHistory.length > 1 || rankLabel" class="score-extras">
+        <div v-if="scoreHistory.length > 1" class="trend-wrap">
+          <span class="trend-label">近{{ scoreHistory.length }}日评分</span>
+          <div ref="trendRef" class="trend-chart" />
+        </div>
+        <div v-if="rankLabel" class="industry-rank">
+          <span class="rank-label">行业</span>
+          <span class="rank-value">{{ rankLabel }}</span>
+        </div>
+      </div>
+
+      <!-- 明细：动态维度列 -->
       <div class="details-section">
         <h4 class="section-title">评分明细</h4>
         <div class="details-cols">
-          <div class="detail-col">
-            <div class="col-header">技术面</div>
+          <div v-for="dim in dimensionList" :key="dim.key" class="detail-col">
+            <div class="col-header" :style="{ color: dim.color }">{{ dim.label }}</div>
             <div class="detail-list">
-              <div v-for="(item, i) in techDetails" :key="i" class="detail-item">
-                <span class="detail-name">{{ item.name }}</span>
-                <span class="detail-score">{{ item.score }}/{{ item.max }}</span>
-                <span :class="['verdict-badge', getVerdict(item)]">{{ item.desc }}</span>
-              </div>
-            </div>
-          </div>
-          <div class="detail-col">
-            <div class="col-header">基本面</div>
-            <div class="detail-list">
-              <div v-for="(item, i) in fundDetails" :key="i" class="detail-item">
-                <span class="detail-name">{{ item.name }}</span>
-                <span class="detail-score">{{ item.score }}/{{ item.max }}</span>
-                <span :class="['verdict-badge', getVerdict(item)]">{{ item.desc }}</span>
-              </div>
-            </div>
-          </div>
-          <div class="detail-col">
-            <div class="col-header">资金面</div>
-            <div class="detail-list">
-              <div v-for="(item, i) in capitalDetails" :key="i" class="detail-item">
+              <div v-for="(item, i) in getDetails(dim.label)" :key="i" class="detail-item">
                 <span class="detail-name">{{ item.name }}</span>
                 <span class="detail-score">{{ item.score }}/{{ item.max }}</span>
                 <span :class="['verdict-badge', getVerdict(item)]">{{ item.desc }}</span>
@@ -67,7 +61,13 @@
 
       <!-- AI 综合判断 -->
       <div v-if="scoreResult" class="ai-judge-section">
-        <h4 class="section-title">综合判断 <span class="ai-badge">AI</span></h4>
+        <div class="ai-header">
+          <h4 class="section-title" style="margin-bottom:0">综合判断 <span class="ai-badge">AI</span></h4>
+          <button class="ai-toggle" :class="{ active: aiJudgeEnabled }" @click="emit('toggle-ai')">
+            {{ aiJudgeEnabled ? '关闭' : '生成' }}
+          </button>
+        </div>
+        <template v-if="aiJudgeEnabled">
         <div v-if="aiJudgeLoading && !aiJudgeText" class="ai-skeleton">
           <div class="ai-skeleton-line" />
           <div class="ai-skeleton-line short" />
@@ -76,26 +76,39 @@
         <div v-if="aiJudgeText" class="ai-content" v-html="renderedAIContent" />
         <span v-if="aiJudgeLoading && aiJudgeText" class="ai-cursor" />
         <div v-if="aiJudgeError && !aiJudgeText" class="ai-error">{{ aiJudgeError }}</div>
+        </template>
       </div>
     </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import * as echarts from 'echarts'
+import { useECharts } from '../../composables/useECharts.js'
+import { getScoreHistory, getScoreChange } from '../../utils/scoreHistory.js'
+import { getIndustryRankLabel } from '../../utils/industryRank.js'
 
 const props = defineProps({
   scoreResult: { type: Object, default: null },
   aiJudgeText: { type: String, default: '' },
   aiJudgeLoading: { type: Boolean, default: false },
   aiJudgeError: { type: String, default: '' },
+  aiJudgeEnabled: { type: Boolean, default: false },
+  stockCode: { type: String, default: '' },
+  industryLabel: { type: String, default: '' },
+  industry: { type: String, default: '' },
 })
+
+const emit = defineEmits(['toggle-ai'])
 
 const gaugeRef = ref(null)
 const radarRef = ref(null)
-let gaugeChart = null
-let radarChart = null
+const trendRef = ref(null)
+
+const gaugeChart = useECharts(gaugeRef)
+const radarChart = useECharts(radarRef)
+const trendChart = useECharts(trendRef)
 
 const confidenceLabel = computed(() => {
   const c = props.scoreResult?.confidence
@@ -104,19 +117,37 @@ const confidenceLabel = computed(() => {
   return '低'
 })
 
+// 评分历史与变化
+const scoreHistory = computed(() => getScoreHistory(props.stockCode))
+const scoreDelta = computed(() => {
+  if (!props.scoreResult || !props.stockCode) return { delta: 0, direction: 'same', prevTotal: null }
+  return getScoreChange(props.stockCode, props.scoreResult.total)
+})
+
+const rankLabel = computed(() => {
+  if (!props.scoreResult || !props.industry) return ''
+  return getIndustryRankLabel(props.scoreResult.total, props.industry)
+})
+
+const DIM_META = {
+  technical: { label: '技术面', color: '#0071e3' },
+  fundamental: { label: '基本面', color: '#30d158' },
+  capital: { label: '资金面', color: '#ffd60a' },
+  risk: { label: '风险面', color: '#ff6b6b' },
+}
+
 const dimensionList = computed(() => {
   const dims = props.scoreResult?.dimensions
   if (!dims) return []
-  return [
-    { label: '技术面', pct: dims.technical.pct, color: '#0071e3' },
-    { label: '基本面', pct: dims.fundamental.pct, color: '#30d158' },
-    { label: '资金面', pct: dims.capital.pct, color: '#ffd60a' },
-  ]
+  return Object.keys(DIM_META)
+    .filter(key => dims[key])
+    .map(key => ({ key, label: DIM_META[key].label, pct: dims[key].pct, color: DIM_META[key].color }))
 })
 
-const fundDetails = computed(() => (props.scoreResult?.details || []).filter(d => d.dimension === '基本面'))
-const capitalDetails = computed(() => (props.scoreResult?.details || []).filter(d => d.dimension === '资金面'))
-const techDetails = computed(() => (props.scoreResult?.details || []).filter(d => d.dimension === '技术面'))
+const allDetails = computed(() => props.scoreResult?.details || [])
+function getDetails(dimensionLabel) {
+  return allDetails.value.filter(d => d.dimension === dimensionLabel)
+}
 
 const renderedAIContent = computed(() => {
   const text = props.aiJudgeText
@@ -139,7 +170,7 @@ function getVerdict(item) {
 
 function renderGauge() {
   const total = props.scoreResult?.total
-  if (!gaugeChart || total == null) return
+  if (total == null) return
 
   gaugeChart.setOption({
     backgroundColor: 'transparent',
@@ -183,16 +214,12 @@ function renderGauge() {
 
 function renderRadar() {
   const dims = props.scoreResult?.dimensions
-  if (!radarChart || !dims) return
+  if (!dims) return
 
   radarChart.setOption({
     backgroundColor: 'transparent',
     radar: {
-      indicator: [
-        { name: '技术面', max: 100 },
-        { name: '基本面', max: 100 },
-        { name: '资金面', max: 100 },
-      ],
+      indicator: dimensionList.value.map(d => ({ name: d.label, max: 100 })),
       radius: '70%',
       axisName: { color: '#94a3b8', fontSize: 12 },
       splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
@@ -202,7 +229,7 @@ function renderRadar() {
     series: [{
       type: 'radar',
       data: [{
-        value: [dims.technical.pct, dims.fundamental.pct, dims.capital.pct],
+        value: dimensionList.value.map(d => d.pct),
         areaStyle: { color: 'rgba(0,113,227,0.2)' },
         lineStyle: { color: '#0071e3', width: 2 },
         itemStyle: { color: '#0071e3' },
@@ -211,74 +238,44 @@ function renderRadar() {
   }, true)
 }
 
+function renderTrend() {
+  const data = scoreHistory.value
+  if (data.length < 2) return
+
+  trendChart.setOption({
+    backgroundColor: 'transparent',
+    animation: false,
+    grid: { left: 2, right: 2, top: 4, bottom: 2 },
+    xAxis: { type: 'category', show: false, data: data.map(d => d.date) },
+    yAxis: { type: 'value', show: false, min: 0, max: 100 },
+    series: [{
+      type: 'line', data: data.map(d => d.total),
+      smooth: true, symbol: 'none',
+      lineStyle: { width: 1.5, color: '#0071e3' },
+      areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+        { offset: 0, color: 'rgba(0,113,227,0.2)' },
+        { offset: 1, color: 'rgba(0,113,227,0)' },
+      ]) },
+    }],
+  })
+}
+
 let mounted = false
 
 watch(() => props.scoreResult, (val) => {
-  if (mounted && val) nextTick(() => { renderGauge(); renderRadar() })
+  if (mounted && val) nextTick(() => { renderGauge(); renderRadar(); renderTrend() })
 }, { deep: true })
 
 onMounted(() => {
   nextTick(() => {
-    if (gaugeRef.value) {
-      gaugeChart = echarts.init(gaugeRef.value)
-      renderGauge()
-      const ro1 = new ResizeObserver(() => gaugeChart?.resize())
-      ro1.observe(gaugeRef.value)
-      gaugeRef.value._ro = ro1
-    }
-    if (radarRef.value) {
-      radarChart = echarts.init(radarRef.value)
-      renderRadar()
-      const ro2 = new ResizeObserver(() => radarChart?.resize())
-      ro2.observe(radarRef.value)
-      radarRef.value._ro = ro2
-    }
+    renderGauge()
+    renderRadar()
+    renderTrend()
     mounted = true
   })
 })
 
-onBeforeUnmount(() => {
-  if (gaugeRef.value?._ro) gaugeRef.value._ro.disconnect()
-  if (radarRef.value?._ro) radarRef.value._ro.disconnect()
-  gaugeChart?.dispose()
-  radarChart?.dispose()
-  gaugeChart = null
-  radarChart = null
-})
-
-onActivated(() => {
-  nextTick(() => {
-    if (gaugeRef.value && !gaugeChart) {
-      gaugeChart = echarts.init(gaugeRef.value)
-      renderGauge()
-    }
-    if (gaugeRef.value && gaugeChart && !gaugeRef.value._ro) {
-      const ro = new ResizeObserver(() => gaugeChart?.resize())
-      ro.observe(gaugeRef.value)
-      gaugeRef.value._ro = ro
-    }
-    if (radarRef.value && !radarChart) {
-      radarChart = echarts.init(radarRef.value)
-      renderRadar()
-    }
-    if (radarRef.value && radarChart && !radarRef.value._ro) {
-      const ro = new ResizeObserver(() => radarChart?.resize())
-      ro.observe(radarRef.value)
-      radarRef.value._ro = ro
-    }
-    gaugeChart?.resize()
-    radarChart?.resize()
-  })
-})
-
-onDeactivated(() => {
-  if (gaugeRef.value?._ro) { gaugeRef.value._ro.disconnect(); gaugeRef.value._ro = null }
-  if (radarRef.value?._ro) { radarRef.value._ro.disconnect(); radarRef.value._ro = null }
-  gaugeChart?.dispose()
-  radarChart?.dispose()
-  gaugeChart = null
-  radarChart = null
-})
+// 注：onBeforeUnmount / onActivated / onDeactivated 由 useECharts composable 自动处理
 </script>
 
 <style scoped>
@@ -529,6 +526,60 @@ onDeactivated(() => {
   }
 }
 
+/* 评分变化箭头 */
+.score-arrow {
+  font-size: 13px;
+  font-weight: 700;
+  margin-left: 4px;
+}
+.score-arrow.up { color: var(--green); }
+.score-arrow.down { color: var(--red); }
+
+/* 评分趋势 + 行业排名 */
+.score-extras {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 0;
+  flex-wrap: wrap;
+}
+
+.trend-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.trend-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.trend-chart {
+  width: 120px;
+  height: 32px;
+}
+
+.industry-rank {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  background: var(--bg-surface-alt);
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+}
+
+.rank-label {
+  color: var(--text-muted);
+}
+
+.rank-value {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 .ai-judge-section {
   background: var(--bg-surface);
   border: 1px solid var(--border);
@@ -548,6 +599,31 @@ onDeactivated(() => {
   padding: 2px 6px;
   border-radius: 4px;
   vertical-align: middle;
+}
+.ai-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.ai-toggle {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 4px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: transparent;
+  color: var(--text-muted, #64748b);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.ai-toggle:hover {
+  border-color: #0071e3;
+  color: #0071e3;
+}
+.ai-toggle.active {
+  background: rgba(255,69,58,0.15);
+  border-color: #ff453a;
+  color: #ff453a;
 }
 
 .ai-skeleton {

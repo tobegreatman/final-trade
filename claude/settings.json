@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Bash",
+      "WebSearch",
+      "WebFetch",
+      "Agent",
+      "mcp__*",
+      "Bash(curl *)",
+      "Bash(node *)",
+      "Bash(node --input-type=module *)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(npx *)",
+      "Bash(python3 -c ' *)",
+      "Bash(grep *)",
+      "Bash(taskkill *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(sleep *)",
+      "Bash(ls *)",
+      "Bash(env)",
+      "Bash(timeout *)"
+    ],
+    "deny": [
+      "Bash(rm *)",
+      "Bash(del *)"
+    ],
+    "additionalDirectories": [
+      "\\tmp",
+      "C:\\Users\\chenhao\\Desktop\\final-trade\\server"
+    ]
+  }
+}

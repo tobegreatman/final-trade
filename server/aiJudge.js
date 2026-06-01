@@ -34,7 +34,7 @@ function getClient() {
 }
 
 function buildPrompt(body) {
-  const { code, name, scoreSummary, techSummary, fundSummary, capitalSummary, priceAction, trendContext, previousAdvice } = body
+  const { code, name, scoreSummary, techSummary, fundSummary, capitalSummary, riskSummary, priceAction, trendContext, previousAdvice } = body
   const dim = scoreSummary?.dimensions || {}
 
   const techDim = dim.technical || {}
@@ -88,6 +88,13 @@ ${t.deviation60 != null ? `- 价格偏离60日线: ${t.deviation60}%` : ''}
     if (capitalSummary.priceVolumeSignal) prompt += `\n- 量价信号: ${capitalSummary.priceVolumeSignal}`
   } else {
     prompt += `\n- 暂无数据`
+  }
+
+  if (riskSummary && riskSummary.details?.length) {
+    prompt += `
+
+## 风险面（得分 ${riskSummary.score || '?'}/${riskSummary.max || '?'}）`
+    riskSummary.details.forEach(d => { prompt += `\n- ${d}` })
   }
 
   if (priceAction) {
@@ -171,10 +178,10 @@ async function handleAIJudge(ctx) {
 
   try {
     const stream = await client.chat.completions.create({
-      model: 'glm-4-flash',
+      model: 'glm-5.1',
       messages: [{ role: 'user', content: prompt }],
       stream: true,
-      max_tokens: 1024,
+      max_tokens: 8192,
     })
 
     ctx.req.on('close', () => {
@@ -182,7 +189,10 @@ async function handleAIJudge(ctx) {
     })
 
     for await (const chunk of stream) {
-      const content = chunk.choices?.[0]?.delta?.content
+      const delta = chunk.choices?.[0]?.delta
+      // GLM-5.1 推理模型：reasoning_content 是思考过程，content 是最终回复
+      // 只取 content，过滤掉 reasoning_content
+      const content = delta?.content
       if (content) {
         fullText += content
         ctx.res.write(`data: ${JSON.stringify({ type: 'text', content })}\n\n`)

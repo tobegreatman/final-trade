@@ -117,6 +117,10 @@
             :ai-judge-text="aiJudgeText"
             :ai-judge-loading="aiJudgeLoading"
             :ai-judge-error="aiJudgeError"
+            :ai-judge-enabled="aiJudgeEnabled"
+            :stock-code="selectedCode"
+            :industry="industryLabel"
+            @toggle-ai="toggleAIJudge"
           />
         </KeepAlive>
       </div>
@@ -134,16 +138,20 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { useWatchlistStore } from '../stores/watchlist.js'
+import { useStockAnalysisStore } from '../stores/stockAnalysis.js'
 import { REFRESH_INTERVAL } from '../utils/constants.js'
 import { calcAllIndicators } from '../utils/indicators.js'
 import { calculateScore, getTrendConclusion, getValuationConclusion, getCapitalConclusion } from '../utils/scoring.js'
+import { saveScoreSnapshot, getScoreChange } from '../utils/scoreHistory.js'
 import { fetchAIJudge } from '../utils/aiJudge.js'
+import { calcRiskScoreItems } from '../utils/riskMetrics.js'
 import TechnicalPanel from '../components/analysis/TechnicalPanel.vue'
 import FundamentalPanel from '../components/analysis/FundamentalPanel.vue'
 import CapitalFlowPanel from '../components/analysis/CapitalFlowPanel.vue'
 import ScorePanel from '../components/analysis/ScorePanel.vue'
 
 const watchlistStore = useWatchlistStore()
+const analysisStore = useStockAnalysisStore()
 
 const selectedCode = ref('')
 const activeTab = ref('score')
@@ -162,10 +170,14 @@ const marginData = ref(null)
 const northboundData = ref(null)
 const mainForceFlow = ref(null)
 const shareholderData = ref(null)
+const benchmarkKlines = ref(null)
 const klinePeriod = ref('101')
 let stockChangeTimer = null
 let refreshTimer = null
 let loadSeq = 0
+let abortCtrl = null       // AbortController：切股时取消在飞请求
+let capitalLoadedSeq = 0   // 资金面已加载的 loadSeq，用于判断是否需要懒加载
+let aiDelayTimer = null    // AI 延迟触发定时器
 
 const styleOptions = [
   { key: 'short', label: '短线', hint: '技术面 50% / 基本面 20% / 资金面 30%' },
@@ -210,6 +222,7 @@ const lastRefreshTime = ref(null)
 const aiJudgeText = ref('')
 const aiJudgeLoading = ref(false)
 const aiJudgeError = ref('')
+const aiJudgeEnabled = ref(false)
 let aiAbortController = null
 
 // 将 margin/northbound/mainForce 注入到 capitalFlow，即使 capitalFlow API 失败也构造空壳对象
@@ -242,8 +255,44 @@ function updateScore(skipAI = false) {
   const cap = capitalFlow.value
   if (!ts.length && !fund) { scoreResult.value = null; return }
   const industry = fund?.latest?.industry || ''
-  scoreResult.value = calculateScore(ts, fund, cap, industry, investStyle.value)
-  if (!skipAI) nextTick(() => triggerAIJudge())
+
+  // 计算风险指标（需要 K 线和基准 K 线）
+  let riskItems = null
+  const kl = klines.value
+  if (kl.length >= 20) {
+    const stockCloses = kl.slice().reverse().map(k => k.close) // K 线按时间倒序，反转为正序
+    const benchCloses = benchmarkKlines.value?.slice().reverse().map(k => k.close) || null
+    const riskResult = calcRiskScoreItems(stockCloses, benchCloses)
+    riskItems = riskResult.items
+  }
+
+  scoreResult.value = calculateScore(ts, fund, cap, industry, investStyle.value, riskItems)
+
+  // 仅在资金面数据已加载时保存评分快照（避免保存不完整评分）
+  if (capitalLoadedSeq === loadSeq) {
+    saveScoreSnapshot(selectedCode.value, scoreResult.value)
+  }
+
+  // AI 分析：仅开关开启时触发
+  if (!skipAI && aiJudgeEnabled.value) {
+    clearTimeout(aiDelayTimer)
+    aiDelayTimer = setTimeout(() => nextTick(() => triggerAIJudge()), 2000)
+  }
+}
+
+function toggleAIJudge() {
+  aiJudgeEnabled.value = !aiJudgeEnabled.value
+  if (aiJudgeEnabled.value && scoreResult.value) {
+    // 开启时立即触发一次
+    clearTimeout(aiDelayTimer)
+    aiDelayTimer = setTimeout(() => nextTick(() => triggerAIJudge()), 500)
+  } else {
+    // 关闭时清空
+    aiJudgeText.value = ''
+    aiJudgeError.value = ''
+    if (aiAbortController) { aiAbortController.abort(); aiAbortController = null }
+    aiJudgeLoading.value = false
+  }
 }
 
 function triggerAIJudge() {
@@ -335,6 +384,11 @@ function triggerAIJudge() {
       marginDesc: marginDetail?.desc,
       priceVolumeSignal: volDetail?.desc,
     },
+    riskSummary: {
+      score: sr.dimensions.risk?.score,
+      max: sr.dimensions.risk?.max,
+      details: (sr.details || []).filter(d => d.dimension === '风险面').map(d => `${d.name}${d.desc}`),
+    },
     priceAction: { latestClose, change5d, change20d },
     trendContext,
     previousAdvice: aiJudgeText.value || null,
@@ -357,6 +411,10 @@ function triggerAIJudge() {
 const trendConclusion = computed(() => getTrendConclusion(techSignals.value))
 const valuationConclusion = computed(() => getValuationConclusion(fundamental.value))
 const capitalConclusion = computed(() => getCapitalConclusion(capitalFlow.value))
+const industryLabel = computed(() => {
+  const ind = fundamental.value?.latest?.industry
+  return ind || ''
+})
 
 function formatPrice(v) {
   if (v == null) return '--'
@@ -407,22 +465,35 @@ function formatChange(pct, amt) {
   return `${sign}${pct.toFixed(2)}%`
 }
 
+/**
+ * 首屏加载：K线 + 基本面（计算综合评分所需的最小数据集）
+ * 资金面数据由 loadCapitalData 懒加载
+ */
 async function loadAnalysis(_manual = true, skipAI = false) {
   const code = selectedCode.value
   const seq = ++loadSeq
+  capitalLoadedSeq = 0  // 重置资金面加载状态
+
   if (!code) {
     klines.value = []
     indicators.value = {}
     techSignals.value = []
     fundamental.value = null
-    capitalFlow.value = null
-    marginData.value = null
-    northboundData.value = null
-    mainForceFlow.value = null
-    shareholderData.value = null
+    analysisStore.invalidate(selectedCode.value)
     loading.value = false
     return
   }
+
+  // 尝试读取缓存：若有未过期的评分缓存，先立即显示
+  const cached = analysisStore.getCached(code)
+  if (cached?.scoreResult && _manual) {
+    scoreResult.value = cached.scoreResult
+  }
+
+  // 取消上一轮在飞请求
+  if (abortCtrl) { abortCtrl.abort() }
+  abortCtrl = new AbortController()
+  const signal = abortCtrl.signal
 
   // 若 onStockChange 已设置 loading 并清空了数据，这里不重复
   if (!loading.value) {
@@ -440,20 +511,13 @@ async function loadAnalysis(_manual = true, skipAI = false) {
   }
 
   try {
-    const [klineRes, fundRes, capRes, marginRes, nbRes, mfRes, shRes] = await Promise.allSettled([
-      fetch(`/api/stock/${code}/kline?klt=${klinePeriod.value}&lmt=250`).then(r => r.json()),
-      fetch(`/api/stock-analysis/fundamental?code=${code}`).then(r => r.json()),
-      fetch(`/api/stock-analysis/capital-flow?code=${code}`).then(r => r.json()),
-      fetch(`/api/stock-analysis/margin?code=${code}`).then(r => r.json()),
-      fetch(`/api/stock-analysis/northbound?code=${code}`).then(r => r.json()),
-      fetch(`/api/stock-analysis/main-force-flow?code=${code}`).then(r => r.json()),
-      fetch(`/api/stock-analysis/shareholder?code=${code}`).then(r => r.json()),
+    // ===== Phase 1：首屏（K线 + 基本面） =====
+    const [klineRes, fundRes] = await Promise.allSettled([
+      fetch(`/api/stock/${code}/kline?klt=${klinePeriod.value}&lmt=250`, { signal }).then(r => r.json()),
+      fetch(`/api/stock-analysis/fundamental?code=${code}`, { signal }).then(r => r.json()),
     ])
 
-    // 防止切股后旧数据覆盖新数据
     if (seq !== loadSeq) return
-
-    setLoadErrors([klineRes, fundRes, capRes, marginRes, nbRes, mfRes, shRes])
 
     // K 线
     if (klineRes.status === 'fulfilled' && klineRes.value.ok) {
@@ -468,41 +532,89 @@ async function loadAnalysis(_manual = true, skipAI = false) {
       fundamental.value = fundRes.value.data
     }
 
-    // 资金面
+    // 记录首屏加载错误（用于 tab 错误点提示）
+    setLoadErrors([klineRes, fundRes,
+      { status: 'fulfilled', value: { ok: true } },
+      { status: 'fulfilled', value: { ok: true } },
+      { status: 'fulfilled', value: { ok: true } },
+      { status: 'fulfilled', value: { ok: true } },
+      { status: 'fulfilled', value: { ok: true } },
+    ])
+
+    // 首屏数据就绪，计算评分（AI 延迟 2s）
+    loading.value = false
+    updateScore(skipAI)
+    dataTimestamp.value = new Date()
+    lastRefreshTime.value = Date.now()
+
+    // ===== Phase 2：资金面（后台静默加载，用于完善评分） =====
+    // 始终加载，资金面数据到齐后会重新 updateScore 并更新缓存
+    loadCapitalData(code, seq, signal, skipAI)
+  } catch (e) {
+    if (e.name === 'AbortError') return  // 切股取消，静默忽略
+    error.value = '数据加载失败: ' + e.message
+    loading.value = false
+  }
+}
+
+/**
+ * 资金面懒加载：5 个资金类 API
+ * 首次切换到资金面 Tab 时触发，或首屏加载完成后如果已在资金面 Tab 则自动触发
+ */
+async function loadCapitalData(code, seq, signal, skipAI = false) {
+  if (capitalLoadedSeq === seq) return  // 已加载过
+  capitalLoadedSeq = seq
+
+  try {
+    const [capRes, marginRes, nbRes, mfRes, shRes, bmRes] = await Promise.allSettled([
+      fetch(`/api/stock-analysis/capital-flow?code=${code}`, { signal }).then(r => r.json()),
+      fetch(`/api/stock-analysis/margin?code=${code}`, { signal }).then(r => r.json()),
+      fetch(`/api/stock-analysis/northbound?code=${code}`, { signal }).then(r => r.json()),
+      fetch(`/api/stock-analysis/main-force-flow?code=${code}`, { signal }).then(r => r.json()),
+      fetch(`/api/stock-analysis/shareholder?code=${code}`, { signal }).then(r => r.json()),
+      fetch('/api/stock-analysis/benchmark-kline?lmt=250', { signal }).then(r => r.json()),
+    ])
+
+    if (seq !== loadSeq) return
+
+    setLoadErrors([
+      { status: 'fulfilled', value: { ok: true } },  // kline placeholder
+      { status: 'fulfilled', value: { ok: true } },  // fundamental placeholder
+      capRes, marginRes, nbRes, mfRes, shRes
+    ]) // bmRes 不影响错误显示
+
+    if (bmRes.status === 'fulfilled' && bmRes.value.ok) {
+      benchmarkKlines.value = bmRes.value.data?.klines || null
+    }
+
     if (capRes.status === 'fulfilled' && capRes.value.ok) {
       capitalFlow.value = capRes.value.data
     }
-
-    // 融资融券
     if (marginRes.status === 'fulfilled' && marginRes.value.ok) {
       marginData.value = marginRes.value.data
     }
-
-    // 北向资金
     if (nbRes.status === 'fulfilled' && nbRes.value.ok) {
       northboundData.value = nbRes.value.data
     }
-
-    // 主力资金流向
     if (mfRes.status === 'fulfilled' && mfRes.value.ok) {
       mainForceFlow.value = mfRes.value.data
     }
-
-    // 股东户数
     if (shRes.status === 'fulfilled' && shRes.value.ok) {
       shareholderData.value = shRes.value.data
     }
 
-    // 统一注入：将融资融券、北向、主力、股东数据合并到 capitalFlow
     injectCapitalExtras()
-
+    // 资金面数据到齐后重新评分
     updateScore(skipAI)
-    dataTimestamp.value = new Date()
-    lastRefreshTime.value = Date.now()
-} catch (e) {
-    error.value = '数据加载失败: ' + e.message
-  } finally {
-    loading.value = false
+    // 更新缓存（此时评分包含完整资金面数据）
+    analysisStore.setCache(code, {
+      scoreResult: scoreResult.value,
+      industry: fundamental.value?.latest?.industry || '',
+    })
+  } catch (e) {
+    if (e.name === 'AbortError') return
+    // 资金面加载失败不阻塞首屏，仅记录错误
+    console.warn('资金面数据加载失败:', e.message)
   }
 }
 
@@ -534,6 +646,8 @@ function onStyleChange(style) {
   investStyle.value = style
   updateScore()
 }
+
+// 注：资金面数据始终由 loadAnalysis → loadCapitalData 后台加载，无需 tab 懒加载
 
 function onSearchInput() {
   if (isComposing) return
@@ -570,10 +684,17 @@ function onSearchSelect(item) {
 }
 
 function onStockChange() {
+  // 取消所有在飞请求
+  if (abortCtrl) { abortCtrl.abort(); abortCtrl = null }
+  clearTimeout(aiDelayTimer)
+
   loading.value = true
   error.value = ''
   scoreResult.value = null
   dataTimestamp.value = null
+  aiJudgeText.value = ''
+  aiJudgeError.value = ''
+  aiJudgeEnabled.value = false
   klines.value = []
   indicators.value = {}
   techSignals.value = []
@@ -583,6 +704,7 @@ function onStockChange() {
   northboundData.value = null
   mainForceFlow.value = null
   shareholderData.value = null
+  benchmarkKlines.value = null
   aiJudgeText.value = ''
   aiJudgeError.value = ''
   aiJudgeLoading.value = false
@@ -638,7 +760,9 @@ onBeforeUnmount(() => {
   watchlistStore.stopAutoRefresh()
   clearTimeout(stockChangeTimer)
   clearTimeout(searchTimer)
+  clearTimeout(aiDelayTimer)
   clearInterval(refreshTimer)
+  if (abortCtrl) { abortCtrl.abort(); abortCtrl = null }
   if (aiAbortController) { aiAbortController.abort(); aiAbortController = null }
 })
 </script>

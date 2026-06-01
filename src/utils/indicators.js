@@ -3,6 +3,8 @@
  * 修复: RSI Wilder平滑, 背离波峰波谷匹配, KDJ超买超卖
  */
 
+import { detectStockDivergence } from './divergence.js'
+
 // ==================== MA 均线（滑动窗口优化） ====================
 export function calcMA(closes, periods = [5, 10, 20, 60]) {
   const result = {}
@@ -34,6 +36,48 @@ export function calcMACD(closes, fast = 12, slow = 26, signal = 9) {
 
   const emaFast = ema(closes, fast)
   const emaSlow = ema(closes, slow)
+  const dif = emaFast.map((v, i) => v - emaSlow[i])
+  const dea = ema(dif, signal)
+  const histogram = dif.map((v, i) => v - dea[i])
+
+  return { dif, dea, histogram }
+}
+
+// ==================== VMACD（成交量加权 MACD） ====================
+/**
+ * 用成交量加权价格计算 MACD，放量突破/缩量整理时信号更敏感
+ * @param {number[]} closes - 收盘价序列
+ * @param {number[]} volumes - 成交量序列（与 closes 等长）
+ * @param {number} fast - 快线周期，默认 12
+ * @param {number} slow - 慢线周期，默认 26
+ * @param {number} signal - 信号线周期，默认 9
+ * @returns {{ dif: number[], dea: number[], histogram: number[] }}
+ */
+export function calcVMACD(closes, volumes, fast = 12, slow = 26, signal = 9) {
+  if (closes.length !== volumes.length || closes.length < slow + signal) {
+    return { dif: [], dea: [], histogram: [] }
+  }
+
+  // 构造成交量加权价格序列：vwPrice[i] = close[i] * (1 + volWeight * normVol[i])
+  // volWeight 控制成交量影响程度，normVol 为相对成交量
+  const volWeight = 0.3
+  const avgVol = volumes.reduce((s, v) => s + v, 0) / volumes.length
+  const vwPrices = closes.map((c, i) => {
+    const normVol = avgVol > 0 ? volumes[i] / avgVol : 1
+    return c * (1 + volWeight * (normVol - 1))
+  })
+
+  const ema = (data, period) => {
+    const k = 2 / (period + 1)
+    const arr = [data[0]]
+    for (let i = 1; i < data.length; i++) {
+      arr.push(data[i] * k + arr[i - 1] * (1 - k))
+    }
+    return arr
+  }
+
+  const emaFast = ema(vwPrices, fast)
+  const emaSlow = ema(vwPrices, slow)
   const dif = emaFast.map((v, i) => v - emaSlow[i])
   const dea = ema(dif, signal)
   const histogram = dif.map((v, i) => v - dea[i])
@@ -116,25 +160,51 @@ export function calcRSI(closes, periods = [6, 12, 24]) {
   return result
 }
 
-// ==================== BOLL 布林带 ====================
+// ==================== BOLL 布林带（滑动窗口 O(n)） ====================
 export function calcBOLL(closes, period = 20, mult = 2) {
   const mid = [], upper = [], lower = []
+  const n = closes.length
+  if (n < period) {
+    for (let i = 0; i < n; i++) { mid.push(null); upper.push(null); lower.push(null) }
+    return { mid, upper, lower }
+  }
 
-  for (let i = 0; i < closes.length; i++) {
-    if (i < period - 1) {
-      mid.push(null)
-      upper.push(null)
-      lower.push(null)
-      continue
-    }
+  // 初始窗口 [0, period-1]
+  let sum = 0
+  for (let i = 0; i < period; i++) sum += closes[i]
+  let ma = sum / period
 
-    let sum = 0
-    for (let j = i - period + 1; j <= i; j++) sum += closes[j]
-    const ma = sum / period
+  // 用 Welford 在线算法避免两轮遍历：M2 = Σ(xi - ma)²
+  let m2 = 0
+  for (let i = 0; i < period; i++) m2 += (closes[i] - ma) ** 2
+  const variance = m2 / (period - 1)
+  let std = Math.sqrt(variance)
 
-    let sqSum = 0
-    for (let j = i - period + 1; j <= i; j++) sqSum += (closes[j] - ma) ** 2
-    const std = Math.sqrt(sqSum / (period - 1))
+  // 前面填 null
+  for (let i = 0; i < period - 1; i++) { mid.push(null); upper.push(null); lower.push(null) }
+
+  // 第一个有效点
+  mid.push(ma)
+  upper.push(ma + mult * std)
+  lower.push(ma - mult * std)
+
+  // 滑动窗口
+  for (let i = period; i < n; i++) {
+    const oldVal = closes[i - period]
+    const newVal = closes[i]
+
+    // 更新 sum → ma
+    sum += newVal - oldVal
+    const newMa = sum / period
+
+    // 更新 M2：用 West 风格增量公式
+    // M2_new = M2_old + (newVal - oldMa) * (newVal - newMa) - (oldVal - oldMa) * (oldVal - newMa)
+    const oldMa = ma
+    m2 += (newVal - oldMa) * (newVal - newMa) - (oldVal - oldMa) * (oldVal - newMa)
+    // 数值稳定性保护
+    const newVar = m2 / (period - 1)
+    std = Math.sqrt(Math.max(0, newVar))
+    ma = newMa
 
     mid.push(ma)
     upper.push(ma + mult * std)
@@ -189,27 +259,7 @@ function generateMASignals(klines, ma) {
   return signals
 }
 
-/**
- * 波峰波谷检测：寻找局部极值点
- * 返回 [{ index, value, type: 'peak'|'trough' }]
- */
-function findPeaksAndTroughs(data, lookback = 5) {
-  const points = []
-  for (let i = lookback; i < data.length - lookback; i++) {
-    if (data[i] == null) continue
-    let isPeak = true, isTrough = true
-    for (let j = i - lookback; j <= i + lookback; j++) {
-      if (j === i || data[j] == null) continue
-      if (data[j] > data[i]) isPeak = false
-      if (data[j] < data[i]) isTrough = false
-    }
-    if (isPeak) points.push({ index: i, value: data[i], type: 'peak' })
-    else if (isTrough) points.push({ index: i, value: data[i], type: 'trough' })
-  }
-  return points
-}
-
-function generateMACDSignals(closes, macd) {
+function generateMACDSignals(closes, macd, vmacdDirection = 'neutral') {
   const signals = []
   const len = closes.length
   if (len < 35) return signals
@@ -217,59 +267,30 @@ function generateMACDSignals(closes, macd) {
   const { dif, dea } = macd
   const last = len - 1
 
+  // VMACD 一致性后缀：方向一致时标注"量能确认"，矛盾时标注"量价背离"
+  const vmacdSuffix = vmacdDirection === 'align' ? '，量能确认'
+    : vmacdDirection === 'conflict' ? '，量价分歧' : ''
+
   // 金叉/死叉
   for (let i = last; i > last - 5 && i > 1; i--) {
     if (dif[i - 1] <= dea[i - 1] && dif[i] > dea[i]) {
-      signals.push({ type: 'bullish', source: 'MACD', text: `MACD金叉 (${dif[i] > 0 ? '零轴上方' : '零轴下方'})` })
+      signals.push({ type: 'bullish', source: 'MACD', text: `MACD金叉 (${dif[i] > 0 ? '零轴上方' : '零轴下方'})${vmacdSuffix}` })
       break
     }
     if (dif[i - 1] >= dea[i - 1] && dif[i] < dea[i]) {
-      signals.push({ type: 'bearish', source: 'MACD', text: `MACD死叉 (${dif[i] > 0 ? '零轴上方' : '零轴下方'})` })
+      signals.push({ type: 'bearish', source: 'MACD', text: `MACD死叉 (${dif[i] > 0 ? '零轴上方' : '零轴下方'})${vmacdSuffix}` })
       break
     }
   }
 
-  // 背离检测（波峰波谷匹配，近 60 日内）
+  // 背离检测（v7.1 增强版，多尺度+幅度过滤+置信度）
   if (len >= 60) {
     const recentN = Math.min(60, len)
     const recentCloses = closes.slice(-recentN)
     const recentDif = macd.dif.slice(-recentN)
 
-    const pricePoints = findPeaksAndTroughs(recentCloses, 3)
-    const difPoints = findPeaksAndTroughs(recentDif, 3)
-
-    // 顶背离：找两个相邻的价格波峰，后峰价格更高但对应 DIF 峰更低
-    const peaks = pricePoints.filter(p => p.type === 'peak')
-    const difPeaks = difPoints.filter(p => p.type === 'peak')
-
-    if (peaks.length >= 2) {
-      const p1 = peaks[peaks.length - 2]
-      const p2 = peaks[peaks.length - 1]
-      if (p2.value > p1.value) {
-        // 价格创新高，找对应位置的 DIF 峰
-        const dp1 = difPeaks.find(m => Math.abs(m.index - p1.index) <= 5)
-        const dp2 = difPeaks.find(m => Math.abs(m.index - p2.index) <= 5)
-        if (dp1 && dp2 && dp2.value < dp1.value) {
-          signals.push({ type: 'bearish', source: 'MACD', text: '顶背离信号' })
-        }
-      }
-    }
-
-    // 底背离：找两个相邻的价格波谷，后谷价格更低但对应 DIF 谷更高
-    const troughs = pricePoints.filter(p => p.type === 'trough')
-    const difTroughs = difPoints.filter(p => p.type === 'trough')
-
-    if (troughs.length >= 2) {
-      const t1 = troughs[troughs.length - 2]
-      const t2 = troughs[troughs.length - 1]
-      if (t2.value < t1.value) {
-        const dt1 = difTroughs.find(m => Math.abs(m.index - t1.index) <= 5)
-        const dt2 = difTroughs.find(m => Math.abs(m.index - t2.index) <= 5)
-        if (dt1 && dt2 && dt2.value > dt1.value) {
-          signals.push({ type: 'bullish', source: 'MACD', text: '底背离信号' })
-        }
-      }
-    }
+    const div = detectStockDivergence(recentCloses, recentDif, 'MACD', 1.0)
+    if (div) signals.push(div)
   }
 
   return signals
@@ -321,44 +342,14 @@ function generateKDJSignals(kdj, closes) {
     }
   }
 
-  // KDJ 背离检测（近 60 日内）
+  // KDJ 背离检测（v7.1 增强版，多尺度+幅度过滤+置信度）
   if (closes.length >= 60 && len >= 60) {
     const recentN = Math.min(60, closes.length)
     const recentCloses = closes.slice(-recentN)
     const recentK = kdj.k.slice(-recentN)
 
-    const pricePoints = findPeaksAndTroughs(recentCloses, 3)
-    const kPoints = findPeaksAndTroughs(recentK, 3)
-
-    // 顶背离：价格创新高但 K 值不创新高
-    const peaks = pricePoints.filter(p => p.type === 'peak')
-    const kPeaks = kPoints.filter(p => p.type === 'peak')
-    if (peaks.length >= 2) {
-      const p1 = peaks[peaks.length - 2]
-      const p2 = peaks[peaks.length - 1]
-      if (p2.value > p1.value) {
-        const kp1 = kPeaks.find(m => Math.abs(m.index - p1.index) <= 5)
-        const kp2 = kPeaks.find(m => Math.abs(m.index - p2.index) <= 5)
-        if (kp1 && kp2 && kp2.value < kp1.value) {
-          signals.push({ type: 'bearish', source: 'KDJ', text: 'KDJ顶背离' })
-        }
-      }
-    }
-
-    // 底背离：价格创新低但 K 值不创新低
-    const troughs = pricePoints.filter(p => p.type === 'trough')
-    const kTroughs = kPoints.filter(p => p.type === 'trough')
-    if (troughs.length >= 2) {
-      const t1 = troughs[troughs.length - 2]
-      const t2 = troughs[troughs.length - 1]
-      if (t2.value < t1.value) {
-        const kt1 = kTroughs.find(m => Math.abs(m.index - t1.index) <= 5)
-        const kt2 = kTroughs.find(m => Math.abs(m.index - t2.index) <= 5)
-        if (kt1 && kt2 && kt2.value > kt1.value) {
-          signals.push({ type: 'bullish', source: 'KDJ', text: 'KDJ底背离' })
-        }
-      }
-    }
+    const div = detectStockDivergence(recentCloses, recentK, 'KDJ', 0.7)
+    if (div) signals.push(div)
   }
 
   return signals
@@ -425,48 +416,23 @@ function generateRSISignals(rsi, closes) {
   if (val6 != null && val12 != null && val24 != null && !hasGoldenCross && !hasDeathCross) {
     if (val6 > 70 && val12 > 65 && val24 > 60) {
       signals.push({ type: 'bearish', source: 'RSI', text: 'RSI多周期共振超买' })
-    } else if (val6 < 30 && val12 < 35 && val24 < 40) {
+    } else if (val6 < 30 && val12 < 35 && val24 < 45) {
       signals.push({ type: 'bullish', source: 'RSI', text: 'RSI多周期共振超卖' })
     }
   }
 
-  // 4. RSI 背离检测（近 60 日内，与 MACD 背离逻辑一致）
+  // 4. RSI 背离检测（v7.1 增强版，多尺度+幅度过滤+置信度）
   if (closes.length >= 60 && rsi6.length >= 60) {
     const recentN = Math.min(60, closes.length)
     const recentCloses = closes.slice(-recentN)
-    const recentRsi = rsi6.slice(-recentN)
-
-    const pricePoints = findPeaksAndTroughs(recentCloses, 3)
-    const rsiPoints = findPeaksAndTroughs(recentRsi, 3)
-
-    // 顶背离：价格创新高但 RSI 不创新高
-    const peaks = pricePoints.filter(p => p.type === 'peak')
-    const rsiPeaks = rsiPoints.filter(p => p.type === 'peak')
-    if (peaks.length >= 2) {
-      const p1 = peaks[peaks.length - 2]
-      const p2 = peaks[peaks.length - 1]
-      if (p2.value > p1.value) {
-        const rp1 = rsiPeaks.find(m => Math.abs(m.index - p1.index) <= 5)
-        const rp2 = rsiPeaks.find(m => Math.abs(m.index - p2.index) <= 5)
-        if (rp1 && rp2 && rp2.value < rp1.value) {
-          signals.push({ type: 'bearish', source: 'RSI', text: 'RSI顶背离' })
-        }
-      }
-    }
-
-    // 底背离：价格创新低但 RSI 不创新低
-    const troughs = pricePoints.filter(p => p.type === 'trough')
-    const rsiTroughs = rsiPoints.filter(p => p.type === 'trough')
-    if (troughs.length >= 2) {
-      const t1 = troughs[troughs.length - 2]
-      const t2 = troughs[troughs.length - 1]
-      if (t2.value < t1.value) {
-        const rt1 = rsiTroughs.find(m => Math.abs(m.index - t1.index) <= 5)
-        const rt2 = rsiTroughs.find(m => Math.abs(m.index - t2.index) <= 5)
-        if (rt1 && rt2 && rt2.value > rt1.value) {
-          signals.push({ type: 'bullish', source: 'RSI', text: 'RSI底背离' })
-        }
-      }
+    let recentRsi = rsi6.slice(-recentN)
+    // 跳过 RSI 前部的 null 值（RSI(6) 前 6 个值为 null），与对应 closes 对齐
+    const firstValid = recentRsi.findIndex(v => v != null)
+    if (firstValid >= 0 && recentRsi.length - firstValid >= 20) {
+      recentRsi = recentRsi.slice(firstValid)
+      const alignedCloses = recentCloses.slice(firstValid)
+      const div = detectStockDivergence(alignedCloses, recentRsi, 'RSI', 0.9)
+      if (div) signals.push(div)
     }
   }
 
@@ -606,12 +572,14 @@ function generateVolumeSignals(klines) {
 // ==================== 入口：一次计算全部指标+信号 ====================
 
 export function calcAllIndicators(klines) {
-  if (!klines || klines.length < 2) return { ma: {}, macd: { dif: [], dea: [], histogram: [] }, kdj: { k: [], d: [], j: [] }, rsi: {}, boll: { mid: [], upper: [], lower: [] }, signals: [] }
+  if (!klines || klines.length < 2) return { ma: {}, macd: { dif: [], dea: [], histogram: [] }, vmacd: { dif: [], dea: [], histogram: [] }, kdj: { k: [], d: [], j: [] }, rsi: {}, boll: { mid: [], upper: [], lower: [] }, signals: [] }
 
   const closes = klines.map(k => k.close)
+  const volumes = klines.map(k => k.volume || 0)
 
   const ma = calcMA(closes)
   const macd = calcMACD(closes)
+  const vmacd = calcVMACD(closes, volumes)
   const kdj = calcKDJ(klines)
   const rsi = calcRSI(closes)
   const boll = calcBOLL(closes)
@@ -623,14 +591,40 @@ export function calcAllIndicators(klines) {
     return { ...k, changePercent: (k.close - klines[i - 1].close) / klines[i - 1].close * 100 }
   })
 
+  // VMACD 方向判断（用于 MACD 信号加权）
+  const vmacdDirection = getVMACDDirection(macd, vmacd)
+
   const signals = [
     ...generateMASignals(klines, ma),
-    ...generateMACDSignals(closes, macd),
+    ...generateMACDSignals(closes, macd, vmacdDirection),
     ...generateKDJSignals(kdj, closes),
     ...generateRSISignals(rsi, closes),
     ...generateBOLLSignals(closes, boll),
     ...generateVolumeSignals(klinesWithChg),
   ]
 
-  return { ma, macd, kdj, rsi, boll, signals }
+  return { ma, macd, vmacd, kdj, rsi, boll, signals }
+}
+
+/**
+ * 判断 VMACD 与 MACD 的方向一致性
+ * @returns {'align'|'conflict'|'neutral'}
+ */
+function getVMACDDirection(macd, vmacd) {
+  const mHist = macd.histogram
+  const vHist = vmacd.histogram
+  if (!mHist.length || !vHist.length) return 'neutral'
+
+  const last = mHist.length - 1
+  const mLast = mHist[last]
+  const mPrev = mHist[last - 1] ?? 0
+  const vLast = vHist[vHist.length - 1]
+  const vPrev = vHist[vHist.length - 2] ?? 0
+
+  const mUp = mLast > mPrev   // MACD 柱线扩大
+  const vUp = vLast > vPrev   // VMACD 柱线扩大
+
+  if (mUp && vUp) return 'align'       // 方向一致，放量确认
+  if (!mUp && !vUp) return 'align'     // 方向一致，缩量确认
+  return 'conflict'                     // 方向矛盾
 }

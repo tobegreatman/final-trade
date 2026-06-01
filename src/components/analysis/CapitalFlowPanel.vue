@@ -152,8 +152,9 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import * as echarts from 'echarts'
+import { useECharts } from '../../composables/useECharts.js'
 import { formatVol, formatYi, formatWan, formatShares, formatFlowYi } from '../../utils/format.js'
 
 const props = defineProps({
@@ -164,21 +165,25 @@ const props = defineProps({
   shareholderData: { type: Object, default: null }
 })
 
+// DOM refs
 const chartRef = ref(null)
 const marginChartRef = ref(null)
 const nbChartRef = ref(null)
 const mfChartRef = ref(null)
 const intradayChartRef = ref(null)
 const shChartRef = ref(null)
-let chart = null
-let marginChart = null
-let nbChart = null
-let mfChart = null
-let intradayChart = null
-let shChart = null
+
+// useECharts 实例 — 自动管理 init / resize / dispose / activated / deactivated
+const volChart = useECharts(chartRef)
+const marginChart = useECharts(marginChartRef)
+const nbChart = useECharts(nbChartRef)
+const mfChart = useECharts(mfChartRef)
+const intradayChart = useECharts(intradayChartRef)
+const shChart = useECharts(shChartRef)
 
 const flows = computed(() => props.capitalFlow?.flows || [])
 const priceVolumeSignal = computed(() => props.capitalFlow?.priceVolumeSignal || '')
+const priceVolumeDir = computed(() => props.capitalFlow?.priceVolumeDir || null)
 const volumeTrend = computed(() => props.capitalFlow?.volumeTrend || null)
 const marginLatest = computed(() => props.marginData?.available ? props.marginData.latest : null)
 const marginItems = computed(() => props.marginData?.available ? (props.marginData.data || []) : [])
@@ -202,22 +207,22 @@ const shItems = computed(() => props.shareholderData?.available ? (props.shareho
 const nbFrequency = computed(() => props.northboundData?._frequency === 'daily' ? '日度数据' : '季度数据')
 
 const signalClass = computed(() => {
-  const s = priceVolumeSignal.value
-  if (s.includes('上涨') || s.includes('流入')) return 'signal-bullish'
-  if (s.includes('下跌') || s.includes('流出')) return 'signal-bearish'
+  const dir = priceVolumeDir.value
+  if (dir === 'bull') return 'signal-bullish'
+  if (dir === 'bear') return 'signal-bearish'
   return 'signal-neutral'
 })
 
 function renderChart() {
   const data = flows.value
-  if (!chart || !data.length) return
+  if (!data.length) return
 
   const dates = data.map(d => d.date)
   const volumes = data.map(d => d.volume)
   const closes = data.map(d => d.close)
   const colors = data.map(d => d.isUp ? '#ff453a' : '#30d158')
 
-  chart.setOption({
+  volChart.setOption({
     backgroundColor: 'transparent',
     animation: false,
     tooltip: {
@@ -241,12 +246,12 @@ function renderChart() {
       { name: '成交量', type: 'bar', data: volumes, itemStyle: { color: (params) => colors[params.dataIndex] }, barMaxWidth: 12 },
       { name: '收盘价', type: 'line', yAxisIndex: 1, data: closes, symbol: 'none', lineStyle: { width: 1.5, color: '#0071e3' } },
     ],
-  }, true)
+  })
 }
 
 function renderMarginChart() {
   const data = marginItems.value
-  if (!marginChart || !data.length) return
+  if (!data.length) return
 
   const dates = data.map(d => d.date)
   const balances = data.map(d => +(d.rzBalance / 1e8).toFixed(2))
@@ -296,34 +301,15 @@ function renderMarginChart() {
   }, true)
 }
 
-watch(() => props.capitalFlow, () => nextTick(() => {
-  if (!chart && chartRef.value && flows.value.length) {
-    chart = echarts.init(chartRef.value)
-    const ro = new ResizeObserver(() => chart?.resize())
-    ro.observe(chartRef.value)
-    chartRef.value._ro = ro
-  }
-  renderChart()
-}), { deep: true })
+watch(() => props.capitalFlow, () => nextTick(() => renderChart()), { deep: true })
 watch(() => props.marginData, () => nextTick(() => {
-  if (!marginLatest.value) {
-    if (marginChartRef.value?._ro) marginChartRef.value._ro.disconnect()
-    marginChart?.dispose()
-    marginChart = null
-    return
-  }
-  if (!marginChart && marginChartRef.value) {
-    marginChart = echarts.init(marginChartRef.value)
-    const ro = new ResizeObserver(() => marginChart?.resize())
-    ro.observe(marginChartRef.value)
-    marginChartRef.value._ro = ro
-  }
+  if (!marginLatest.value) { marginChart.dispose(); return }
   renderMarginChart()
 }), { deep: true })
 
 function renderNbChart() {
   const data = nbItems.value
-  if (!nbChart || data.length < 2) return
+  if (data.length < 2) return
 
   const dates = data.map(d => d.date)
   const caps = data.map(d => +(d.holdMarketCap / 1e8).toFixed(2))
@@ -372,24 +358,13 @@ function renderNbChart() {
 }
 
 watch(() => props.northboundData, () => nextTick(() => {
-  if (!nbLatest.value) {
-    if (nbChartRef.value?._ro) nbChartRef.value._ro.disconnect()
-    nbChart?.dispose()
-    nbChart = null
-    return
-  }
-  if (!nbChart && nbChartRef.value && nbItems.value.length > 1) {
-    nbChart = echarts.init(nbChartRef.value)
-    const ro = new ResizeObserver(() => nbChart?.resize())
-    ro.observe(nbChartRef.value)
-    nbChartRef.value._ro = ro
-  }
+  if (!nbLatest.value) { nbChart.dispose(); return }
   renderNbChart()
 }), { deep: true })
 
 function renderIntradayChart() {
   const items = intradayItems.value
-  if (!intradayChart || items.length < 1) return
+  if (items.length < 1) return
 
   const times = items.map(d => d.time.slice(11, 16))
   const y = (v) => +(v / 1e8).toFixed(4)
@@ -485,7 +460,7 @@ function renderIntradayChart() {
 
 function renderMfChart() {
   const data = mfItems.value.slice(-20)
-  if (!mfChart || data.length < 2) return
+  if (data.length < 2) return
 
   const dates = data.map(d => d.date)
   const mainFlows = data.map(d => +(d.mainNetInflow / 1e8).toFixed(2))
@@ -550,36 +525,18 @@ function renderMfChart() {
 
 watch(() => props.mainForceFlow, () => nextTick(() => {
   if (!mfLatest.value) {
-    if (mfChartRef.value?._ro) mfChartRef.value._ro.disconnect()
-    mfChart?.dispose()
-    mfChart = null
-    if (intradayChartRef.value?._ro) intradayChartRef.value._ro.disconnect()
-    intradayChart?.dispose()
-    intradayChart = null
+    mfChart.dispose()
+    intradayChart.dispose()
     return
-  }
-  if (!mfChart && mfChartRef.value && mfItems.value.length > 1) {
-    mfChart = echarts.init(mfChartRef.value)
-    const ro = new ResizeObserver(() => mfChart?.resize())
-    ro.observe(mfChartRef.value)
-    mfChartRef.value._ro = ro
   }
   renderMfChart()
   // 日内分时图：需要等 v-if 生效后 DOM 才存在，延迟一帧
-  nextTick(() => {
-    if (!intradayChart && intradayChartRef.value && intradayItems.value.length > 1) {
-      intradayChart = echarts.init(intradayChartRef.value)
-      const ro = new ResizeObserver(() => intradayChart?.resize())
-      ro.observe(intradayChartRef.value)
-      intradayChartRef.value._ro = ro
-    }
-    renderIntradayChart()
-  })
+  nextTick(() => renderIntradayChart())
 }), { deep: true })
 
 function renderShChart() {
   const data = [...shItems.value].reverse()
-  if (!shChart || data.length < 2) return
+  if (data.length < 2) return
 
   const dates = data.map(d => d.date?.slice(0, 10) || '')
   const counts = data.map(d => d.holderCount)
@@ -608,138 +565,22 @@ function renderShChart() {
 }
 
 watch(() => props.shareholderData, () => nextTick(() => {
-  if (!shLatest.value) {
-    if (shChartRef.value?._ro) shChartRef.value._ro.disconnect()
-    shChart?.dispose()
-    shChart = null
-    return
-  }
-  if (!shChart && shChartRef.value && shItems.value.length > 1) {
-    shChart = echarts.init(shChartRef.value)
-    const ro = new ResizeObserver(() => shChart?.resize())
-    ro.observe(shChartRef.value)
-    shChartRef.value._ro = ro
-  }
+  if (!shLatest.value) { shChart.dispose(); return }
   renderShChart()
 }), { deep: true })
 
-onMounted(() => {
-  // 延迟初始化：仅在数据可用时创建 ECharts 实例
-  if (chartRef.value && flows.value.length) {
-    chart = echarts.init(chartRef.value)
-    renderChart()
-    const ro = new ResizeObserver(() => chart?.resize())
-    ro.observe(chartRef.value)
-    chartRef.value._ro = ro
-  }
+// onMounted：数据已就位时渲染（处理切 tab 时 watcher 不触发的情况）
+onMounted(() => nextTick(() => {
+  if (flows.value.length) renderChart()
+  if (mfItems.value.length > 1) renderMfChart()
+  if (nbItems.value.length > 1) renderNbChart()
+  if (marginItems.value.length) renderMarginChart()
+  if (shItems.value.length > 1) renderShChart()
+  // 日内分时图需要额外一帧等 v-if 渲染 DOM
+  nextTick(() => { if (intradayItems.value.length > 1) renderIntradayChart() })
+}))
 
-  // 主力资金图表（处理切 tab 时数据已就位、watcher 不触发的情况）
-  nextTick(() => {
-    if (!mfChart && mfChartRef.value && mfItems.value.length > 1) {
-      mfChart = echarts.init(mfChartRef.value)
-      renderMfChart()
-      const ro = new ResizeObserver(() => mfChart?.resize())
-      ro.observe(mfChartRef.value)
-      mfChartRef.value._ro = ro
-    }
-    if (!nbChart && nbChartRef.value && nbItems.value.length > 1) {
-      nbChart = echarts.init(nbChartRef.value)
-      renderNbChart()
-      const ro = new ResizeObserver(() => nbChart?.resize())
-      ro.observe(nbChartRef.value)
-      nbChartRef.value._ro = ro
-    }
-    if (!marginChart && marginChartRef.value && marginItems.value.length) {
-      marginChart = echarts.init(marginChartRef.value)
-      renderMarginChart()
-      const ro = new ResizeObserver(() => marginChart?.resize())
-      ro.observe(marginChartRef.value)
-      marginChartRef.value._ro = ro
-    }
-    if (!shChart && shChartRef.value && shItems.value.length > 1) {
-      shChart = echarts.init(shChartRef.value)
-      renderShChart()
-      const ro = new ResizeObserver(() => shChart?.resize())
-      ro.observe(shChartRef.value)
-      shChartRef.value._ro = ro
-    }
-    // 日内分时图需要额外一帧等 v-if 渲染 DOM
-    nextTick(() => {
-      if (!intradayChart && intradayChartRef.value && intradayItems.value.length > 1) {
-        intradayChart = echarts.init(intradayChartRef.value)
-        renderIntradayChart()
-        const ro = new ResizeObserver(() => intradayChart?.resize())
-        ro.observe(intradayChartRef.value)
-        intradayChartRef.value._ro = ro
-      }
-    })
-  })
-})
-
-onBeforeUnmount(() => {
-  if (chartRef.value?._ro) chartRef.value._ro.disconnect()
-  chart?.dispose()
-  chart = null
-  if (marginChartRef.value?._ro) marginChartRef.value._ro.disconnect()
-  marginChart?.dispose()
-  marginChart = null
-  if (nbChartRef.value?._ro) nbChartRef.value._ro.disconnect()
-  nbChart?.dispose()
-  nbChart = null
-  if (mfChartRef.value?._ro) mfChartRef.value._ro.disconnect()
-  mfChart?.dispose()
-  mfChart = null
-  if (intradayChartRef.value?._ro) intradayChartRef.value._ro.disconnect()
-  intradayChart?.dispose()
-  intradayChart = null
-  if (shChartRef.value?._ro) shChartRef.value._ro.disconnect()
-  shChart?.dispose()
-  shChart = null
-})
-
-onActivated(() => {
-  nextTick(() => {
-    const reconnect = (refVal, chartInst, initFn) => {
-      if (refVal && !chartInst) {
-        chartInst = echarts.init(refVal)
-        initFn(chartInst)
-      }
-      if (refVal && chartInst && !refVal._ro) {
-        const ro = new ResizeObserver(() => chartInst?.resize())
-        ro.observe(refVal)
-        refVal._ro = ro
-      }
-      chartInst?.resize()
-      return chartInst
-    }
-
-    chart = reconnect(chartRef.value, chart, (c) => { chart = c; renderChart() })
-    marginChart = reconnect(marginChartRef.value, marginChart, (c) => { marginChart = c; renderMarginChart() })
-    nbChart = reconnect(nbChartRef.value, nbChart, (c) => { nbChart = c; renderNbChart() })
-    mfChart = reconnect(mfChartRef.value, mfChart, (c) => { mfChart = c; renderMfChart() })
-    intradayChart = reconnect(intradayChartRef.value, intradayChart, (c) => { intradayChart = c; renderIntradayChart() })
-    shChart = reconnect(shChartRef.value, shChart, (c) => { shChart = c; renderShChart() })
-  })
-})
-
-onDeactivated(() => {
-  const disconnect = (refVal) => {
-    if (refVal?._ro) { refVal._ro.disconnect(); refVal._ro = null }
-  }
-  disconnect(chartRef.value)
-  disconnect(marginChartRef.value)
-  disconnect(nbChartRef.value)
-  disconnect(mfChartRef.value)
-  disconnect(intradayChartRef.value)
-  disconnect(shChartRef.value)
-
-  chart?.dispose(); chart = null
-  marginChart?.dispose(); marginChart = null
-  nbChart?.dispose(); nbChart = null
-  mfChart?.dispose(); mfChart = null
-  intradayChart?.dispose(); intradayChart = null
-  shChart?.dispose(); shChart = null
-})
+// 注：onBeforeUnmount / onActivated / onDeactivated 由 useECharts composable 自动处理
 </script>
 
 <style scoped>

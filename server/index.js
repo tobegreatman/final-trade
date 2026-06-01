@@ -313,10 +313,14 @@ router.get('/api/market/northbound', async (ctx) => {
     let flows
     try {
       const data = await fetchJSON(url)
-      flows = (data.result?.data || []).map(d => ({
-        date: d.TRADE_DATE?.slice(0, 10), nfAmt: d.NF_DEAL_AMT, sscAmt: d.SSC_DEAL_AMT, stAmt: d.ST_DEAL_AMT,
-        sciRate: d.SCI_INDEX_RATE, sscRate: d.SSC_CHANGE_RATE
-      }))
+      flows = (data.result?.data || []).map(d => {
+        const sciRate = d.SCI_INDEX_RATE
+        // SSC_CHANGE_RATE 返回的是深证成指指数绝对值（~10000），不是涨跌幅；仅 sciRate 可用
+        return {
+          date: d.TRADE_DATE?.slice(0, 10), nfAmt: d.NF_DEAL_AMT, sscAmt: d.SSC_DEAL_AMT, stAmt: d.ST_DEAL_AMT,
+          sciRate, sscRate: 0
+        }
+      })
     } catch (e1) {
       console.log('[northbound] eastmoney failed, trying stcn:', e1.message)
       flows = await fetchNorthboundStcn()

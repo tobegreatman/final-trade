@@ -102,6 +102,7 @@
               <div class="signal-card__body">
                 <div class="signal-card__dim">
                   {{ sig.dimension }}
+                  <span v-if="sig.hint" class="dim-hint">{{ sig.hint }}</span>
                   <span v-if="sig.divergence" class="div-badge" :class="sig.divergence">{{ sig.divergence === 'bullish' ? '底背离' : '顶背离' }}</span>
                   <span v-if="sig.weight >= 1.5 && !sig.divergence" class="weight-badge">强</span>
                 </div>
@@ -1375,6 +1376,12 @@ onBeforeUnmount(() => {
 .signal-card__indices .index-tag.tag-neutral {
   background: var(--bg-surface);
   color: var(--text-muted);
+}
+.signal-card__dim .dim-hint {
+  font-size: 9px;
+  opacity: 0.5;
+  margin-left: 4px;
+  font-weight: 400;
 }
 
 .signal-card__tag {

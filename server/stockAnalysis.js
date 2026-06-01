@@ -350,7 +350,7 @@ async function getCapitalFlowData(code) {
   }
 
   if (klines.length < 10) {
-    return { flows: [], available: false, _source: 'derived', volumeTrend: null, priceVolumeSignal: '数据不足' }
+    return { flows: [], available: false, _source: 'derived', volumeTrend: null, priceVolumeSignal: '数据不足', priceVolumeDir: 'neutral' }
   }
 
   // 近 20 日用于展示
@@ -380,14 +380,17 @@ async function getCapitalFlowData(code) {
   const trendUp = recentAvgClose > prevAvgClose
 
   let priceVolumeSignal = '量价平稳'
-  if (volumeChangeRate > 30 && recentAvgChg > 0.5) priceVolumeSignal = '放量上涨'
-  else if (volumeChangeRate > 30 && recentAvgChg < -0.5) priceVolumeSignal = '放量下跌'
+  let priceVolumeDir = 'neutral'
+  if (volumeChangeRate > 30 && recentAvgChg > 0.5) { priceVolumeSignal = '放量上涨'; priceVolumeDir = 'bull' }
+  else if (volumeChangeRate > 30 && recentAvgChg < -0.5) { priceVolumeSignal = '放量下跌'; priceVolumeDir = 'bear' }
   else if (volumeChangeRate < -20 && recentAvgChg < -0.5) {
-    priceVolumeSignal = trendUp ? '缩量回调（洗盘）' : '缩量下跌（弱势）'
+    if (trendUp) { priceVolumeSignal = '缩量回调（洗盘）'; priceVolumeDir = 'bull' }
+    else { priceVolumeSignal = '缩量下跌（弱势）'; priceVolumeDir = 'bear' }
   } else if (volumeChangeRate < -20 && recentAvgChg > 0) {
-    priceVolumeSignal = trendUp ? '缩量整理（蓄势）' : '缩量调整（弱势）'
-  } else if (recentAvgChg > 0.5) priceVolumeSignal = '温和上涨'
-  else if (recentAvgChg < -0.5) priceVolumeSignal = '温和下跌'
+    if (trendUp) { priceVolumeSignal = '缩量整理（蓄势）'; priceVolumeDir = 'bull' }
+    else { priceVolumeSignal = '缩量调整（弱势）'; priceVolumeDir = 'bear' }
+  } else if (recentAvgChg > 0.5) { priceVolumeSignal = '温和上涨'; priceVolumeDir = 'bull' }
+  else if (recentAvgChg < -0.5) { priceVolumeSignal = '温和下跌'; priceVolumeDir = 'bear' }
 
   return {
     flows,
@@ -398,7 +401,8 @@ async function getCapitalFlowData(code) {
       prevAvgVol: Math.round(prevAvgVol),
       volumeChangeRate: Math.round(volumeChangeRate * 10) / 10
     },
-    priceVolumeSignal
+    priceVolumeSignal,
+    priceVolumeDir
   }
 }
 
@@ -869,6 +873,33 @@ async function handleShareholder(ctx) {
   }
 }
 
+// ==================== 基准指数 K 线（用于 Beta 计算） ====================
+const benchmarkCache = new Map()
+const BENCHMARK_CACHE_TTL = 30 * 60 * 1000
+
+async function handleBenchmarkKline(ctx) {
+  const lmt = parseInt(ctx.query.lmt) || 250
+  const cacheKey = `hs300_${lmt}`
+  const cached = benchmarkCache.get(cacheKey)
+  if (cached) { ctx.body = ok(cached); return }
+
+  try {
+    const secid = '1.000300' // 沪深 300
+    const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=20500101&lmt=${lmt}`
+    const data = await fetchJSON(url)
+    const rawKlines = data.data?.klines || []
+    const klines = rawKlines.map(s => {
+      const p = s.split(',')
+      return { date: p[0], open: +p[1], close: +p[2], high: +p[3], low: +p[4], volume: +p[5], amount: +p[6] }
+    })
+    const result = { klines, source: 'hs300' }
+    benchmarkCache.set(cacheKey, result)
+    ctx.body = ok(result)
+  } catch (e) {
+    ctx.body = fail('基准K线获取失败: ' + e.message)
+  }
+}
+
 // ==================== 路由注册 ====================
 export function registerStockAnalysisRoutes(router) {
   router.get('/api/stock-analysis/fundamental', handleFundamental)
@@ -877,4 +908,5 @@ export function registerStockAnalysisRoutes(router) {
   router.get('/api/stock-analysis/margin', handleMargin)
   router.get('/api/stock-analysis/main-force-flow', handleMainForceFlow)
   router.get('/api/stock-analysis/shareholder', handleShareholder)
+  router.get('/api/stock-analysis/benchmark-kline', handleBenchmarkKline)
 }

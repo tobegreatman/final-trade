@@ -25,6 +25,13 @@ const PE_THRESHOLDS = {
   broker: { low: 15, fair: 25, high: 40 },
   mining: { low: 10, fair: 20, high: 35 },
   agriculture: { low: 12, fair: 25, high: 40 },
+  // 新增行业
+  environmental: { low: 15, fair: 28, high: 45 },   // 环保
+  education: { low: 15, fair: 30, high: 50 },        // 教育
+  tourism: { low: 15, fair: 30, high: 55 },           // 文旅
+  media: { low: 18, fair: 35, high: 55 },             // 传媒娱乐
+  logistics: { low: 10, fair: 20, high: 35 },         // 物流运输
+  textile: { low: 10, fair: 18, high: 30 },           // 纺织服装
 }
 
 // ==================== 行业 PB 分档 ====================
@@ -49,6 +56,13 @@ const PB_THRESHOLDS = {
   broker: { low: 1.0, fair: 1.8, high: 3.0 },
   mining: { low: 1.0, fair: 2.5, high: 4.5 },
   agriculture: { low: 1.0, fair: 2.5, high: 4.5 },
+  // 新增行业
+  environmental: { low: 1.0, fair: 2.0, high: 4.0 },
+  education: { low: 1.5, fair: 3.5, high: 7.0 },
+  tourism: { low: 1.5, fair: 3.5, high: 7.0 },
+  media: { low: 1.5, fair: 3.5, high: 7.0 },
+  logistics: { low: 1.0, fair: 2.0, high: 3.5 },
+  textile: { low: 0.8, fair: 1.8, high: 3.5 },
 }
 
 // ==================== 行业负债率分档 ====================
@@ -60,6 +74,52 @@ const DEBT_THRESHOLDS = {
   broker: { safe: 70, moderate: 80, high: 90 },
   utility: { safe: 55, moderate: 70, high: 80 },
   construction: { safe: 55, moderate: 70, high: 80 },
+  // 新增行业
+  medicine: { safe: 30, moderate: 45, high: 60 },
+  tech: { safe: 25, moderate: 40, high: 55 },
+  semiconductor: { safe: 25, moderate: 40, high: 55 },
+  newenergy: { safe: 40, moderate: 55, high: 70 },
+  chemical: { safe: 40, moderate: 55, high: 70 },
+  auto: { safe: 40, moderate: 55, high: 70 },
+  logistics: { safe: 35, moderate: 50, high: 65 },
+  tourism: { safe: 35, moderate: 50, high: 65 },
+}
+
+// ==================== 行业毛利率分档 ====================
+// 阈值: [优秀, 良好, 一般, 偏低]，低于最低值为"很低"
+const GROSS_MARGIN_THRESHOLDS = {
+  default: [40, 25, 15, 5],     // 通用基准
+  // 高毛利行业：软件/半导体
+  tech: [60, 45, 30, 15],
+  semiconductor: [60, 45, 30, 15],
+  // 中高毛利行业：医药/食品
+  medicine: [50, 35, 20, 10],
+  food: [50, 35, 20, 10],
+  // 中等毛利行业
+  newenergy: [35, 22, 12, 5],
+  military: [35, 22, 12, 5],
+  appliance: [35, 22, 12, 5],
+  auto: [30, 20, 10, 5],
+  mining: [30, 20, 10, 5],
+  // 中低毛利行业：制造/化工
+  chemical: [30, 20, 10, 5],
+  construction: [25, 15, 8, 3],
+  steel: [20, 12, 6, 2],
+  coal: [30, 18, 10, 4],
+  // 低毛利行业：零售/贸易/金融
+  realestate: [30, 18, 10, 4],
+  broker: [40, 25, 15, 5],
+  bank: [50, 35, 20, 10],
+  insurance: [30, 18, 10, 4],
+  utility: [35, 22, 12, 5],
+  agriculture: [30, 18, 10, 4],
+  // 新增行业
+  environmental: [35, 22, 12, 5],
+  education: [55, 40, 25, 12],
+  tourism: [45, 30, 18, 8],
+  media: [45, 30, 18, 8],
+  logistics: [25, 15, 8, 3],
+  textile: [25, 15, 8, 3],
 }
 
 /**
@@ -71,16 +131,17 @@ const DEBT_THRESHOLDS = {
  * @returns {Object} { total, dimensions, suggestion, confidence, details }
  */
 const STYLE_WEIGHTS = {
-  short: { technical: 0.50, fundamental: 0.20, capital: 0.30 },
-  mid:   { technical: 0.40, fundamental: 0.35, capital: 0.25 },
-  long:  { technical: 0.30, fundamental: 0.45, capital: 0.25 },
+  short: { technical: 0.45, fundamental: 0.20, capital: 0.25, risk: 0.10 },
+  mid:   { technical: 0.35, fundamental: 0.35, capital: 0.20, risk: 0.10 },
+  long:  { technical: 0.25, fundamental: 0.45, capital: 0.20, risk: 0.10 },
 }
 
-export function calculateScore(techSignals = [], fundamental = null, capitalFlow = null, industry = '', style = 'short') {
+export function calculateScore(techSignals = [], fundamental = null, capitalFlow = null, industry = '', style = 'short', riskItems = null) {
   const dimensions = {
     technical: { score: 0, max: 40, items: [] },
     fundamental: { score: 0, max: 42, items: [] },
-    capital: { score: 0, max: 29, items: [] }
+    capital: { score: 0, max: 29, items: [] },
+    risk: { score: 0, max: 15, items: [] }
   }
 
   // ========== 技术面评分 (0-40) ==========
@@ -215,9 +276,9 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   if (volSignal?.text?.includes('连续放量上涨')) {
     tech.items.push({ name: '量价', score: 4, max: 4, desc: volSignal.text })
   } else if (volSignal?.text?.includes('放量上涨')) {
-    tech.items.push({ name: '量价', score: 4, max: 4, desc: volSignal.text })
+    tech.items.push({ name: '量价', score: 3, max: 4, desc: volSignal.text })
   } else if (volSignal?.text?.includes('缩量回调')) {
-    tech.items.push({ name: '量价', score: 4, max: 4, desc: volSignal.text })
+    tech.items.push({ name: '量价', score: 3, max: 4, desc: volSignal.text })
   } else if (volSignal?.text?.includes('量价配合')) {
     tech.items.push({ name: '量价', score: 3, max: 4, desc: '量价配合良好' })
   } else if (volSignal?.text?.includes('连续缩量调整')) {
@@ -231,6 +292,25 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
   }
 
   tech.score = tech.items.reduce((s, i) => s + i.score, 0)
+
+  // P1: 多指标共振系数 — 多维度同向时加强信号权重
+  const bullCount = techSignals.filter(s => s.type === 'bullish').length
+  const bearCount = techSignals.filter(s => s.type === 'bearish').length
+  if (bullCount >= 5) {
+    tech.score = Math.round(tech.score * 1.15)
+    tech.resonance = '强多头共振'
+  } else if (bullCount >= 4) {
+    tech.score = Math.round(tech.score * 1.07)
+    tech.resonance = '多头共振'
+  } else if (bearCount >= 5) {
+    tech.score = Math.round(tech.score * 0.85)
+    tech.resonance = '强空头共振'
+  } else if (bearCount >= 4) {
+    tech.score = Math.round(tech.score * 0.93)
+    tech.resonance = '空头共振'
+  }
+  // 共振后重新钳位
+  tech.score = Math.max(0, Math.min(tech.max, tech.score))
 
   // ========== 基本面评分 (0-42) ==========
   const fund = dimensions.fundamental
@@ -349,7 +429,7 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     if (latest.pb != null) {
       const t = getPBThresholds(industry || latest.industry || '')
       const pb = latest.pb
-      const midPB = +(t.fair * 2 + t.high).toFixed(2) / 3
+      const midPB = +((t.fair * 2 + t.high) / 3).toFixed(2)
       if (pb <= 0) {
         fund.items.push({ name: 'PB估值', score: 0, max: 4, desc: `PB ${pb.toFixed(1)}，破净异常` })
       } else if (pb <= t.low) {
@@ -388,16 +468,17 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
       fund.items.push({ name: '现金流质量', ...FUND_MISSING.cashflow, desc: '暂无数据' })
     }
 
-    // 8. 毛利率 (0-4) — 反映真实竞争力
+    // 8. 毛利率 (0-4) — 行业感知阈值
     if (latest.grossMargin != null) {
       const gm = latest.grossMargin
-      if (gm >= 40) {
+      const [excellent, good, fair, low] = getGrossMarginThresholds(industry || latest.industry || '')
+      if (gm >= excellent) {
         fund.items.push({ name: '毛利率', score: 4, max: 4, desc: `毛利率 ${gm.toFixed(1)}%，优秀` })
-      } else if (gm >= 25) {
+      } else if (gm >= good) {
         fund.items.push({ name: '毛利率', score: 3, max: 4, desc: `毛利率 ${gm.toFixed(1)}%，良好` })
-      } else if (gm >= 15) {
+      } else if (gm >= fair) {
         fund.items.push({ name: '毛利率', score: 2, max: 4, desc: `毛利率 ${gm.toFixed(1)}%，一般` })
-      } else if (gm >= 5) {
+      } else if (gm >= low) {
         fund.items.push({ name: '毛利率', score: 1, max: 4, desc: `毛利率 ${gm.toFixed(1)}%，偏低` })
       } else {
         fund.items.push({ name: '毛利率', score: 0, max: 4, desc: `毛利率 ${gm.toFixed(1)}%，很低` })
@@ -605,18 +686,59 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
 
   cap.score = cap.items.reduce((s, i) => s + i.score, 0)
 
+  // ========== 风险面评分 (0-15) ==========
+  const risk = dimensions.risk
+  if (riskItems && riskItems.length) {
+    risk.items = riskItems
+  } else {
+    // 无风险数据时给中间分，权重归零
+    risk.items = [
+      { name: 'Sharpe', score: 3, max: 5, desc: '暂无数据' },
+      { name: '最大回撤', score: 3, max: 5, desc: '暂无数据' },
+      { name: 'Beta', score: 3, max: 5, desc: '暂无数据' },
+    ]
+  }
+  risk.score = risk.items.reduce((s, i) => s + i.score, 0)
+
   // ========== 动态权重合成 ==========
   const hasFundData = !!fundamental?.latest
+  const hasRiskData = riskItems && riskItems.length > 0
   const baseWeights = STYLE_WEIGHTS[style] || STYLE_WEIGHTS.mid
 
-  const weights = hasFundData
-    ? baseWeights
-    : { technical: Math.min(baseWeights.technical + 0.10, 0.65), fundamental: Math.max(baseWeights.fundamental - 0.10, 0.10), capital: baseWeights.capital }
+  let weights
+  if (hasFundData && hasRiskData) {
+    weights = baseWeights
+  } else if (hasFundData) {
+    // 无风险数据：风险权重归零，按比例分配给其他三维度
+    const scale = 1 / (1 - baseWeights.risk)
+    weights = {
+      technical: baseWeights.technical * scale,
+      fundamental: baseWeights.fundamental * scale,
+      capital: baseWeights.capital * scale,
+      risk: 0
+    }
+  } else if (hasRiskData) {
+    weights = {
+      technical: Math.min(baseWeights.technical + 0.10, 0.65),
+      fundamental: Math.max(baseWeights.fundamental - 0.10, 0.10),
+      capital: baseWeights.capital,
+      risk: baseWeights.risk
+    }
+  } else {
+    const scale = 1 / (1 - baseWeights.risk)
+    weights = {
+      technical: Math.min((baseWeights.technical + 0.10) * scale, 0.65),
+      fundamental: Math.max(baseWeights.fundamental * scale, 0.10),
+      capital: baseWeights.capital * scale,
+      risk: 0
+    }
+  }
 
   const total = Math.round(
     tech.score / tech.max * 100 * weights.technical +
     fund.score / fund.max * 100 * weights.fundamental +
-    cap.score / cap.max * 100 * weights.capital
+    cap.score / cap.max * 100 * weights.capital +
+    risk.score / risk.max * 100 * weights.risk
   )
 
   // 置信度 — 根据数据完整度分三档
@@ -663,6 +785,7 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     ...tech.items.map(i => ({ ...i, dimension: '技术面' })),
     ...fund.items.map(i => ({ ...i, dimension: '基本面' })),
     ...cap.items.map(i => ({ ...i, dimension: '资金面' })),
+    ...risk.items.map(i => ({ ...i, dimension: '风险面' })),
   ]
 
   return {
@@ -670,7 +793,8 @@ export function calculateScore(techSignals = [], fundamental = null, capitalFlow
     dimensions: {
       technical: { score: tech.score, max: tech.max, pct: Math.round(tech.score / tech.max * 100) },
       fundamental: { score: fund.score, max: fund.max, pct: Math.round(fund.score / fund.max * 100) },
-      capital: { score: cap.score, max: cap.max, pct: Math.round(cap.score / cap.max * 100) }
+      capital: { score: cap.score, max: cap.max, pct: Math.round(cap.score / cap.max * 100) },
+      risk: { score: risk.score, max: risk.max, pct: Math.round(risk.score / risk.max * 100) }
     },
     suggestion,
     suggestionColor,
@@ -685,9 +809,9 @@ const INDUSTRY_CN_MAP = {
   '银行': 'bank', '保险': 'insurance', '房地产': 'realestate',
   '钢铁': 'steel', '煤炭': 'coal', '食品': 'food', '饮料': 'food',
   '白酒': 'food', '酒': 'food',
-  '医药': 'medicine', '生物': 'medicine',
+  '医药': 'medicine', '生物': 'medicine', '化学制药': 'medicine', '生物制药': 'medicine', '中药': 'medicine',
   '计算机': 'tech', '电子': 'tech', '通信': 'tech',
-  '传媒': 'tech', '互联网': 'tech', '软件': 'tech',
+  '互联网': 'tech', '软件': 'tech',
   '半导体': 'semiconductor', '芯片': 'semiconductor',
   '国防': 'military', '军工': 'military',
   '新能源': 'newenergy', '光伏': 'newenergy', '锂电': 'newenergy',
@@ -699,16 +823,29 @@ const INDUSTRY_CN_MAP = {
   '证券': 'broker', '券商': 'broker',
   '有色': 'mining', '采矿': 'mining', '矿业': 'mining',
   '农业': 'agriculture', '牧': 'agriculture', '渔': 'agriculture',
+  // 新增行业关键字
+  '环保': 'environmental', '节能': 'environmental', '环境治理': 'environmental',
+  '教育': 'education', '培训': 'education',
+  '旅游': 'tourism', '酒店': 'tourism', '餐饮': 'tourism', '文旅': 'tourism',
+  '传媒': 'media', '娱乐': 'media', '影视': 'media', '游戏': 'media',
+  '物流': 'logistics', '运输': 'logistics', '港口': 'logistics', '机场': 'logistics', '航运': 'logistics',
+  '纺织': 'textile', '服装': 'textile', '服饰': 'textile',
 }
+
+// 预排序：关键字从长到短，长关键字优先匹配，命中即停
+const _sortedCNEntries = Object.entries(INDUSTRY_CN_MAP)
+  .sort((a, b) => b[0].length - a[0].length)
 
 function matchIndustryKey(industry) {
   if (!industry) return null
   const lower = industry.toLowerCase()
+  // 英文 key 精确匹配（避免子串误匹配）
   for (const key of Object.keys(PE_THRESHOLDS)) {
     if (key === 'default') continue
-    if (lower.includes(key)) return key
+    if (lower === key) return key
   }
-  for (const [cn, key] of Object.entries(INDUSTRY_CN_MAP)) {
+  // 中文关键字：按长度降序匹配，命中即停
+  for (const [cn, key] of _sortedCNEntries) {
     if (industry.includes(cn)) return key
   }
   return null
@@ -730,6 +867,12 @@ export function getPBThresholds(industry) {
 export function getDebtThresholds(industry) {
   const key = matchIndustryKey(industry)
   return (key && DEBT_THRESHOLDS[key]) ? DEBT_THRESHOLDS[key] : DEBT_THRESHOLDS.default
+}
+
+// 毛利率行业分档辅助
+export function getGrossMarginThresholds(industry) {
+  const key = matchIndustryKey(industry)
+  return (key && GROSS_MARGIN_THRESHOLDS[key]) ? GROSS_MARGIN_THRESHOLDS[key] : GROSS_MARGIN_THRESHOLDS.default
 }
 
 /**

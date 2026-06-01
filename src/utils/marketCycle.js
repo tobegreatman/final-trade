@@ -194,8 +194,8 @@ function scoreNorthbound(northbound) {
   else if (changeRatio < -0.05) score -= 3
 
   // 市场方向联合信号：成交额放大+市场下跌=疑似净卖出，反之亦然
-  // 用近期数据的指数涨跌幅（sciRate字段，如有）辅助判断
-  const rates = recent.map(d => d.sciRate || d.sscRate || 0).filter(v => v !== 0)
+  // 用近期数据的指数涨跌幅（sciRate字段）辅助判断
+  const rates = recent.map(d => d.sciRate || 0).filter(v => v !== 0)
   if (rates.length >= 2) {
     const avgRate = rates.reduce((a, b) => a + b, 0) / rates.length
     const amtTrend = changeRatio > 0 ? 1 : changeRatio < -0.05 ? -1 : 0
